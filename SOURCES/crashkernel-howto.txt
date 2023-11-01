@@ -1,0 +1,120 @@
+Introduction
+============
+
+This document describes features the kexec-tools package provides for setting
+and estimating the crashkernel value.
+
+Kdump lives in a pre-reserved chunk of memory, and the size of the reserved
+memory is specified by the `crashkernel=` kernel parameter. It's hard to
+estimate an accurate `crashkernel=` value, so it's always recommended to test
+kdump after you updated the `crashkernel=` value or changed the dump target.
+
+
+Default crashkernel value
+=========================
+
+Latest kexec-tools provides "kdumpctl get-default-crashkernel" to retrieve
+the default crashkernel value,
+
+	$ echo $(kdumpctl get-default-crashkernel)
+	1G-4G:192M,4G-64G:256M,64G-:512M
+
+It will be taken as the default value of 'crashkernel=', you can use
+this value as a reference for setting crashkernel value manually.
+
+
+New installed system
+====================
+
+Anaconda is the OS installer which sets all the kernel boot cmdline on a newly
+installed system. If kdump is enabled during Anaconda installation, Anaconda
+will use the default crashkernel value as the default `crashkernel=` value on
+the newly installed system.
+
+Users can override the value during Anaconda installation manually.
+
+
+Auto update of crashkernel boot parameter
+=========================================
+
+A new release of kexec-tools could update the default crashkernel value.  By
+default, kexec-tools would reset crashkernel to the new default value if it
+detects the old default crashkernel value is used by installed kernels. If you
+don't want kexec-tools to update the old default crashkernel to the new default
+crashkernel, you can change auto_reset_crashkernel to no in kdump.conf.
+
+Supported Bootloaders
+---------------------
+
+This auto update only works with GRUB2 and ZIPL, as kexec-tools heavily depends
+on `grubby`. If other boot loaders are used, the user will have to update the
+`crashkernel=` value manually.
+
+
+Reset crashkernel to default value
+==================================
+
+kexec-tools only perform the auto update of crashkernel value when it can
+confirm the boot kernel's crashkernel value is using its corresponding default
+value and auto_reset_crashkernel=yes in kdump.conf. In other cases, the user
+can reset the crashkernel value by themselves.
+
+Reset using kdumpctl
+--------------------
+
+To make it easier to reset the `crashkernel=` kernel cmdline to this default
+value properly, `kdumpctl` also provides a sub-command:
+
+	`kdumpctl reset-crashkernel [--kernel=path_to_kernel] [--reboot]`
+
+This command will reset the bootloader's kernel cmdline to the default value.
+It will also update bootloader config if the bootloader has a standalone config
+file. User will have to reboot the machine after this command to make it take
+effect if --reboot is not specified. For more details, please refer to the
+reset-crashkernel command in `man kdumpctl`.
+
+Reset manually
+--------------
+
+To reset the crashkernel value manually, it's recommended to use utils like
+`grubby`. A one liner script for resetting `crashkernel=` value of all installed
+kernels to the default value is:
+
+	grubby --update-kernel ALL --args "crashkernel=$(kdumpctl get-default-crashkernel)"
+
+NOTE: On s390x you also need to run zipl for the change to take effect.
+
+Estimate crashkernel
+====================
+
+The best way to estimate a usable crashkernel value is by testing kdump
+manually.  And you can set crashkernel to a large value, then adjust the
+crashkernel value to an acceptable value gradually.
+
+`kdumpctl` also provides a sub-command for doing rough estimating without
+triggering kdump:
+
+	`kdumpctl estimate`
+
+The output will be like this:
+
+```
+      Encrypted kdump target requires extra memory, assuming using the keyslot with minimum memory requirement
+
+      Reserved crashkernel:    256M
+      Recommended crashkernel: 655M
+
+      Kernel image size:   47M
+      Kernel modules size: 12M
+      Initramfs size:      19M
+      Runtime reservation: 64M
+      LUKS required size:  512M
+      Large modules:
+          xfs: 1892352
+          nouveau: 2318336
+      WARNING: Current crashkernel size is lower than recommended size 655M.
+```
+
+It will generate a summary report about the estimated memory consumption
+of each component of kdump. The value may not be accurate enough, but
+would be a good start for finding a suitable crashkernel value.

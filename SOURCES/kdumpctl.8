@@ -1,0 +1,72 @@
+.TH KDUMPCTL 8 2015-07-13 kexec-tools
+
+.SH NAME
+kdumpctl \- control interface for kdump
+
+.SH SYNOPSIS
+.B kdumpctl
+.I COMMAND
+
+.SH DESCRIPTION
+.B kdumpctl
+is used to check or control the kdump service.
+In most cases, you should use
+.B systemctl
+to start / stop / enable kdump service instead. However,
+.B kdumpctl
+provides more details for debugging and a helper to set up ssh key authentication.
+
+.SH COMMANDS
+.TP
+.I start
+Start the service.
+.TP
+.I stop
+Stop the service.
+.TP
+.I status
+Prints the current status of kdump service.
+It returns a non-zero value if kdump is not operational.
+.TP
+.I restart
+Is equal to
+.I start; stop
+.TP
+.I reload
+reload the crash kernel image and initramfs without triggering a rebuild.
+.TP
+.I rebuild
+rebuild the crash kernel initramfs.
+.TP
+.I propagate
+Helps to setup key authentication for ssh storage since it's
+impossible to use password authentication during kdump.
+.TP
+.I showmem
+Prints the size of reserved memory for the crash kernel in megabytes.
+.TP
+.I estimate
+Estimate a suitable crashkernel value for the current machine. This is a
+best-effort estimate. It will print a recommended crashkernel value
+based on the current kdump setup, and list some details of memory usage.
+.TP
+.I get-default-crashkernel
+Return the default crashkernel value provided by kexec-tools.
+.TP
+.I reset-crashkernel [--kernel=path_to_kernel] [--reboot]
+Reset crashkernel to default value recommended by kexec-tools. If no kernel
+is specified, will reset KDUMP_KERNELVER if it's defined in /etc/sysconfig/kdump
+or the current running kernel's crashkernel value if KDUMP_KERNELVER is empty. You can
+also specify --kernel=ALL and --kernel=DEFAULT which have the same meaning as
+grubby's kernel-path=ALL and kernel-path=DEFAULT. ppc64le supports FADump and
+supports an additional [--fadump=[on|off|nocma]] parameter to toggle FADump
+on/off.
+
+Note: The memory requirements for kdump varies heavily depending on the
+used hardware and system configuration. Thus the recommended
+crashkernel might not work for your specific setup. Please test if
+kdump works after resetting the crashkernel value.
+
+.SH "SEE ALSO"
+.BR kdump.conf (5),
+.BR mkdumprd (8)
