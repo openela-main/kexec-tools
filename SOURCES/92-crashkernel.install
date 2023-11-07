@@ -1,0 +1,13 @@
+#!/usr/bin/bash
+
+COMMAND="$1"
+KERNEL_VERSION="$2"
+KDUMP_INITRD_DIR_ABS="$3"
+KERNEL_IMAGE="$4"
+
+case "$COMMAND" in
+add)
+	kdumpctl _reset-crashkernel-for-installed_kernel "$KERNEL_VERSION"
+	exit 0
+	;;
+esac

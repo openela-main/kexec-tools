@@ -1,0 +1,1911 @@
+#!/bin/bash
+KEXEC=/sbin/kexec
+
+KDUMP_KERNELVER=""
+KDUMP_KERNEL=""
+KDUMP_COMMANDLINE=""
+KEXEC_ARGS=""
+KDUMP_LOG_PATH="/var/log"
+MKDUMPRD="/sbin/mkdumprd -f"
+MKFADUMPRD="/sbin/mkfadumprd"
+DRACUT_MODULES_FILE="/usr/lib/dracut/modules.txt"
+SAVE_PATH=/var/crash
+SSH_KEY_LOCATION="/root/.ssh/kdump_id_rsa"
+DUMP_TARGET=""
+DEFAULT_INITRD=""
+DEFAULT_INITRD_BAK=""
+INITRD_CHECKSUM_LOCATION=""
+KDUMP_INITRD=""
+TARGET_INITRD=""
+FADUMP_REGISTER_SYS_NODE="/sys/kernel/fadump_registered"
+#kdump shall be the default dump mode
+DEFAULT_DUMP_MODE="kdump"
+image_time=0
+
+standard_kexec_args="-d -p"
+
+# Some default values in case /etc/sysconfig/kdump doesn't include
+KDUMP_COMMANDLINE_REMOVE="hugepages hugepagesz slub_debug"
+
+if [[ -f /etc/sysconfig/kdump ]]; then
+	. /etc/sysconfig/kdump
+fi
+
+[[ $dracutbasedir ]] || dracutbasedir=/usr/lib/dracut
+. $dracutbasedir/dracut-functions.sh
+. /lib/kdump/kdump-lib.sh
+. /lib/kdump/kdump-logger.sh
+
+#initiate the kdump logger
+if ! dlog_init; then
+	echo "failed to initiate the kdump logger."
+	exit 1
+fi
+
+KDUMP_TMPDIR=$(mktemp --tmpdir -d kdump.XXXX)
+trap '
+    ret=$?;
+    rm -rf "$KDUMP_TMPDIR"
+    exit $ret;
+    ' EXIT
+
+single_instance_lock()
+{
+	local rc timeout=5 lockfile
+
+	if [[ -d /run/lock ]]; then
+		lockfile=/run/lock/kdump
+	else
+		# when updating package using virt-customize, /run/lock doesn't exist
+		lockfile=/tmp/kdump.lock
+	fi
+
+	if ! exec 9> $lockfile; then
+		derror "Create file lock failed"
+		exit 1
+	fi
+
+	flock -n 9
+	rc=$?
+
+	while [[ $rc -ne 0 ]]; do
+		dinfo "Another app is currently holding the kdump lock; waiting for it to exit..."
+		flock -w $timeout 9
+		rc=$?
+	done
+}
+
+determine_dump_mode()
+{
+	# Check if firmware-assisted dump is enabled
+	# if yes, set the dump mode as fadump
+	if is_fadump_capable; then
+		dinfo "Dump mode is fadump"
+		DEFAULT_DUMP_MODE="fadump"
+	fi
+	ddebug "DEFAULT_DUMP_MODE=$DEFAULT_DUMP_MODE"
+}
+
+save_core()
+{
+	coredir="/var/crash/$(date +"%Y-%m-%d-%H:%M")"
+
+	mkdir -p "$coredir"
+	ddebug "cp --sparse=always /proc/vmcore $coredir/vmcore-incomplete"
+	if cp --sparse=always /proc/vmcore "$coredir/vmcore-incomplete"; then
+		mv "$coredir/vmcore-incomplete" "$coredir/vmcore"
+		dinfo "saved a vmcore to $coredir"
+	else
+		derror "failed to save a vmcore to $coredir"
+	fi
+
+	# pass the dmesg to Abrt tool if exists, in order
+	# to collect the kernel oops message.
+	# https://fedorahosted.org/abrt/
+	if [[ -x /usr/bin/dumpoops ]]; then
+		ddebug "makedumpfile --dump-dmesg $coredir/vmcore $coredir/dmesg"
+		makedumpfile --dump-dmesg "$coredir/vmcore" "$coredir/dmesg" > /dev/null 2>&1
+		ddebug "dumpoops -d $coredir/dmesg"
+		if dumpoops -d "$coredir/dmesg" > /dev/null 2>&1; then
+			dinfo "kernel oops has been collected by abrt tool"
+		fi
+	fi
+}
+
+rebuild_fadump_initrd()
+{
+	if ! $MKFADUMPRD "$DEFAULT_INITRD_BAK" "$TARGET_INITRD" --kver "$KDUMP_KERNELVER"; then
+		derror "mkfadumprd: failed to make fadump initrd"
+		return 1
+	fi
+
+	return 0
+}
+
+check_earlykdump_is_enabled()
+{
+	grep -q -w "rd.earlykdump" /proc/cmdline
+	return $?
+}
+
+rebuild_kdump_initrd()
+{
+	ddebug "rebuild kdump initrd: $MKDUMPRD $TARGET_INITRD $KDUMP_KERNELVER"
+	if ! $MKDUMPRD "$TARGET_INITRD" "$KDUMP_KERNELVER"; then
+		derror "mkdumprd: failed to make kdump initrd"
+		return 1
+	fi
+
+	if check_earlykdump_is_enabled; then
+		dwarn "Tips: If early kdump is enabled, also require rebuilding the system initramfs to make the changes take effect for early kdump."
+	fi
+
+	return 0
+}
+
+rebuild_initrd()
+{
+	if [[ ! -w $(dirname "$TARGET_INITRD") ]]; then
+		derror "$(dirname "$TARGET_INITRD") does not have write permission. Cannot rebuild $TARGET_INITRD"
+		return 1
+	fi
+
+	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
+		rebuild_fadump_initrd
+	else
+		rebuild_kdump_initrd
+	fi
+
+	return $?
+}
+
+#$1: the files to be checked with IFS=' '
+check_exist()
+{
+	for file in $1; do
+		if [[ ! -e $file ]]; then
+			derror "Error: $file not found."
+			return 1
+		fi
+	done
+}
+
+#$1: the files to be checked with IFS=' '
+check_executable()
+{
+	for file in $1; do
+		if [[ ! -x $file ]]; then
+			derror "Error: $file is not executable."
+			return 1
+		fi
+	done
+}
+
+backup_default_initrd()
+{
+	ddebug "backup default initrd: $DEFAULT_INITRD"
+
+	if [[ ! -f $DEFAULT_INITRD ]]; then
+		return
+	fi
+
+	if [[ ! -e $DEFAULT_INITRD_BAK ]]; then
+		dinfo "Backing up $DEFAULT_INITRD before rebuild."
+		# save checksum to verify before restoring
+		sha1sum "$DEFAULT_INITRD" > "$INITRD_CHECKSUM_LOCATION"
+		if ! cp "$DEFAULT_INITRD" "$DEFAULT_INITRD_BAK"; then
+			dwarn "WARNING: failed to backup $DEFAULT_INITRD."
+			rm -f -- "$INITRD_CHECKSUM_LOCATION"
+			rm -f -- "$DEFAULT_INITRD_BAK"
+		fi
+	fi
+}
+
+restore_default_initrd()
+{
+	ddebug "restore default initrd: $DEFAULT_INITRD"
+
+	if [[ ! -f $DEFAULT_INITRD ]]; then
+		return
+	fi
+
+	# If a backup initrd exists, we must be switching back from
+	# fadump to kdump. Restore the original default initrd.
+	if [[ -f $DEFAULT_INITRD_BAK ]] && [[ -f $INITRD_CHECKSUM_LOCATION ]]; then
+		# verify checksum before restoring
+		backup_checksum=$(sha1sum "$DEFAULT_INITRD_BAK" | awk '{ print $1 }')
+		default_checksum=$(awk '{ print $1 }' "$INITRD_CHECKSUM_LOCATION")
+		if [[ $default_checksum != "$backup_checksum" ]]; then
+			dwarn "WARNING: checksum mismatch! Can't restore original initrd.."
+		else
+			rm -f $INITRD_CHECKSUM_LOCATION
+			if mv "$DEFAULT_INITRD_BAK" "$DEFAULT_INITRD"; then
+				derror "Restoring original initrd as fadump mode is disabled."
+				sync
+			fi
+		fi
+	fi
+}
+
+check_config()
+{
+	local -A _opt_rec
+	while read -r config_opt config_val; do
+		case "$config_opt" in
+		dracut_args)
+			if [[ $config_val == *--mount* ]]; then
+				if [[ $(echo "$config_val" | grep -o "\-\-mount" | wc -l) -ne 1 ]]; then
+					derror 'Multiple mount targets specified in one "dracut_args".'
+					return 1
+				fi
+				config_opt=_target
+			fi
+			;;
+		raw)
+			if [[ -d "/proc/device-tree/ibm,opal/dump" ]]; then
+				dwarn "WARNING: Won't capture opalcore when 'raw' dump target is used."
+			fi
+			config_opt=_target
+			;;
+		ext[234] | minix | btrfs | xfs | nfs | ssh | virtiofs)
+			config_opt=_target
+			;;
+		sshkey | path | core_collector | kdump_post | kdump_pre | extra_bins | extra_modules | failure_action | default | final_action | force_rebuild | force_no_rebuild | fence_kdump_args | fence_kdump_nodes | auto_reset_crashkernel) ;;
+
+		net | options | link_delay | disk_timeout | debug_mem_level | blacklist)
+			derror "Deprecated kdump config option: $config_opt. Refer to kdump.conf manpage for alternatives."
+			return 1
+			;;
+		'')
+			continue
+			;;
+		*)
+			derror "Invalid kdump config option $config_opt"
+			return 1
+			;;
+		esac
+
+		if [[ -z $config_val ]]; then
+			derror "Invalid kdump config value for option '$config_opt'"
+			return 1
+		fi
+
+		if [[ -n ${_opt_rec[$config_opt]} ]]; then
+			if [[ $config_opt == _target ]]; then
+				derror "More than one dump targets specified"
+			else
+				derror "Duplicated kdump config value of option $config_opt"
+			fi
+			return 1
+		fi
+		_opt_rec[$config_opt]="$config_val"
+	done <<< "$(kdump_read_conf)"
+
+	check_failure_action_config || return 1
+	check_final_action_config || return 1
+	check_fence_kdump_config || return 1
+
+	return 0
+}
+
+# get_pcs_cluster_modified_files <image timestamp>
+# return list of modified file for fence_kdump modified in Pacemaker cluster
+get_pcs_cluster_modified_files()
+{
+	local time_stamp
+	local modified_files
+
+	is_generic_fence_kdump && return 1
+	is_pcs_fence_kdump || return 1
+
+	time_stamp=$(pcs cluster cib | xmllint --xpath 'string(/cib/@cib-last-written)' - | xargs -0 date +%s --date)
+
+	if [[ -n $time_stamp ]] && [[ $time_stamp -gt $image_time ]]; then
+		modified_files="cluster-cib"
+	fi
+
+	if [[ -f $FENCE_KDUMP_CONFIG_FILE ]]; then
+		time_stamp=$(stat -c "%Y" "$FENCE_KDUMP_CONFIG_FILE")
+		if [[ $time_stamp -gt $image_time ]]; then
+			modified_files="$modified_files $FENCE_KDUMP_CONFIG_FILE"
+		fi
+	fi
+
+	echo "$modified_files"
+}
+
+setup_initrd()
+{
+	if ! prepare_kdump_bootinfo; then
+		derror "failed to prepare for kdump bootinfo."
+		return 1
+	fi
+
+	DEFAULT_INITRD_BAK="$KDUMP_BOOTDIR/.$(basename "$DEFAULT_INITRD").default"
+	INITRD_CHECKSUM_LOCATION="$DEFAULT_INITRD_BAK.checksum"
+	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
+		TARGET_INITRD="$DEFAULT_INITRD"
+
+		# backup initrd for reference before replacing it
+		# with fadump aware initrd
+		backup_default_initrd
+	else
+		TARGET_INITRD="$KDUMP_INITRD"
+
+		# check if a backup of default initrd exists. If yes,
+		# it signifies a switch from fadump mode. So, restore
+		# the backed up default initrd.
+		restore_default_initrd
+	fi
+}
+
+check_files_modified()
+{
+	local modified_files=""
+
+	#also rebuild when Pacemaker cluster conf is changed and fence kdump is enabled.
+	modified_files=$(get_pcs_cluster_modified_files)
+
+	EXTRA_BINS=$(kdump_get_conf_val kdump_post)
+	CHECK_FILES=$(kdump_get_conf_val kdump_pre)
+	HOOKS="/etc/kdump/post.d/ /etc/kdump/pre.d/"
+	if [[ -d /etc/kdump/post.d ]]; then
+		for file in /etc/kdump/post.d/*; do
+			if [[ -x $file ]]; then
+				POST_FILES="$POST_FILES $file"
+			fi
+		done
+	fi
+	if [[ -d /etc/kdump/pre.d ]]; then
+		for file in /etc/kdump/pre.d/*; do
+			if [[ -x $file ]]; then
+				PRE_FILES="$PRE_FILES $file"
+			fi
+		done
+	fi
+	HOOKS="$HOOKS $POST_FILES $PRE_FILES"
+	CORE_COLLECTOR=$(kdump_get_conf_val core_collector | awk '{print $1}')
+	CORE_COLLECTOR=$(type -P "$CORE_COLLECTOR")
+	# POST_FILES and PRE_FILES are already checked against executable, need not to check again.
+	EXTRA_BINS="$EXTRA_BINS $CHECK_FILES"
+	CHECK_FILES=$(kdump_get_conf_val extra_bins)
+	EXTRA_BINS="$EXTRA_BINS $CHECK_FILES"
+	files="$KDUMP_CONFIG_FILE $KDUMP_KERNEL $EXTRA_BINS $CORE_COLLECTOR"
+	[[ -e /etc/fstab ]] && files="$files /etc/fstab"
+
+	# Check for any updated extra module
+	EXTRA_MODULES="$(kdump_get_conf_val extra_modules)"
+	if [[ -n $EXTRA_MODULES ]]; then
+		if [[ -e /lib/modules/$KDUMP_KERNELVER/modules.dep ]]; then
+			files="$files /lib/modules/$KDUMP_KERNELVER/modules.dep"
+		fi
+		for _module in $EXTRA_MODULES; do
+			if _module_file="$(modinfo --set-version "$KDUMP_KERNELVER" --filename "$_module" 2> /dev/null)"; then
+				files="$files $_module_file"
+				for _dep_modules in $(modinfo -F depends "$_module" | tr ',' ' '); do
+					files="$files $(modinfo --set-version "$KDUMP_KERNELVER" --filename "$_dep_modules" 2> /dev/null)"
+				done
+			else
+				# If it's not a module nor builtin, give an error
+				if ! (modprobe --set-version "$KDUMP_KERNELVER" --dry-run "$_module" &> /dev/null); then
+					dwarn "Module $_module not found"
+				fi
+			fi
+		done
+	fi
+
+	# HOOKS is mandatory and need to check the modification time
+	files="$files $HOOKS"
+	is_lvm2_thinp_dump_target && files="$files $LVM_CONF"
+	check_exist "$files" && check_executable "$EXTRA_BINS" || return 2
+
+	for file in $files; do
+		if [[ -e $file ]]; then
+			time_stamp=$(stat -c "%Y" "$file")
+			if [[ $time_stamp -gt $image_time ]]; then
+				modified_files="$modified_files $file"
+			fi
+			if [[ -L $file ]]; then
+				file=$(readlink -m "$file")
+				time_stamp=$(stat -c "%Y" "$file")
+				if [[ $time_stamp -gt $image_time ]]; then
+					modified_files="$modified_files $file"
+				fi
+			fi
+		else
+			dwarn "$file doesn't exist"
+		fi
+	done
+
+	if [[ -n $modified_files ]]; then
+		dinfo "Detected change(s) in the following file(s): $modified_files"
+		return 1
+	fi
+
+	return 0
+}
+
+check_drivers_modified()
+{
+	local _target _new_drivers _old_drivers _module_name _module_filename
+
+	# If it's dump target is on block device, detect the block driver
+	_target=$(get_block_dump_target)
+	if [[ -n $_target ]]; then
+		_record_block_drivers()
+		{
+			local _drivers
+			_drivers=$(udevadm info -a "/dev/block/$1" | sed -n 's/\s*DRIVERS=="\(\S\+\)"/\1/p')
+			for _driver in $_drivers; do
+				if ! [[ " $_new_drivers " == *" $_driver "* ]]; then
+					_new_drivers="$_new_drivers $_driver"
+				fi
+			done
+
+			ddebug "MAJ:MIN=$1 drivers='$_drivers'"
+		}
+		check_block_and_slaves_all _record_block_drivers "$(get_maj_min "$_target")"
+	fi
+
+	# Include watchdog drivers if watchdog module is not omitted
+	is_dracut_mod_omitted watchdog || _new_drivers+=" $(get_watchdog_drvs)"
+	[[ -z $_new_drivers ]] && return 0
+
+	if is_fadump_capable; then
+		_old_drivers="$(lsinitrd "$TARGET_INITRD" -f /usr/lib/dracut/fadump-kernel-modules.txt | tr '\n' ' ')"
+	else
+		_old_drivers="$(lsinitrd "$TARGET_INITRD" -f /usr/lib/dracut/hostonly-kernel-modules.txt | tr '\n' ' ')"
+	fi
+
+	ddebug "Modules required for kdump: '$_new_drivers'"
+	ddebug "Modules included in old initramfs: '$_old_drivers'"
+	for _driver in $_new_drivers; do
+		# Skip deprecated/invalid driver name or built-in module
+		_module_name=$(modinfo --set-version "$KDUMP_KERNELVER" -F name "$_driver" 2> /dev/null)
+		_module_filename=$(modinfo --set-version "$KDUMP_KERNELVER" -n "$_driver" 2> /dev/null)
+		if [[ -z $_module_name ]] || [[ -z $_module_filename ]] || [[ $_module_filename == *"(builtin)"* ]]; then
+			continue
+		fi
+		if ! [[ " $_old_drivers " == *" $_module_name "* ]]; then
+			dinfo "Detected change in block device driver, new loaded module: $_module_name"
+			return 1
+		fi
+	done
+}
+
+check_fs_modified()
+{
+	local _old_dev _old_mntpoint _old_fstype
+	local _new_dev _new_mntpoint _new_fstype
+	local _target _dracut_args
+
+	# No need to check in case of mount target specified via "dracut_args".
+	if is_mount_in_dracut_args; then
+		return 0
+	fi
+
+	# No need to check in case of raw target.
+	# Currently we do not check also if ssh/nfs/virtiofs/thinp target is specified
+	if is_ssh_dump_target || is_nfs_dump_target || is_raw_dump_target ||
+		is_virtiofs_dump_target || is_lvm2_thinp_dump_target; then
+		return 0
+	fi
+
+	_target=$(get_block_dump_target)
+	_new_fstype=$(get_fs_type_from_target "$_target")
+	if [[ -z $_target ]] || [[ -z $_new_fstype ]]; then
+		derror "Dump target is invalid"
+		return 2
+	fi
+
+	ddebug "_target=$_target _new_fstype=$_new_fstype"
+	_new_dev=$(kdump_get_persistent_dev "$_target")
+	if [[ -z $_new_dev ]]; then
+		perror "Get persistent device name failed"
+		return 2
+	fi
+
+	_new_mntpoint="$(get_kdump_mntpoint_from_target "$_target")"
+	_dracut_args=$(lsinitrd "$TARGET_INITRD" -f usr/lib/dracut/build-parameter.txt)
+	if [[ -z $_dracut_args ]]; then
+		dwarn "Warning: No dracut arguments found in initrd"
+		return 0
+	fi
+
+	# if --mount argument present then match old and new target, mount
+	# point and file system. If any of them mismatches then rebuild
+	if echo "$_dracut_args" | grep -q "\-\-mount"; then
+		# shellcheck disable=SC2046
+		set -- $(echo "$_dracut_args" | awk -F "--mount '" '{print $2}' | cut -d' ' -f1,2,3)
+		_old_dev=$1
+		_old_mntpoint=$2
+		_old_fstype=$3
+		[[ $_new_dev == "$_old_dev" && $_new_mntpoint == "$_old_mntpoint" && $_new_fstype == "$_old_fstype" ]] && return 0
+	# otherwise rebuild if target device is not a root device
+	else
+		[[ $_target == "$(get_root_fs_device)" ]] && return 0
+	fi
+
+	dinfo "Detected change in File System"
+	return 1
+}
+
+# returns 0 if system is not modified
+# returns 1 if system is modified
+# returns 2 if system modification is invalid
+check_system_modified()
+{
+	local ret
+
+	[[ -f $TARGET_INITRD ]] || return 1
+
+	check_files_modified
+	ret=$?
+	if [[ $ret -ne 0 ]]; then
+		return $ret
+	fi
+
+	check_fs_modified
+	ret=$?
+	if [[ $ret -ne 0 ]]; then
+		return $ret
+	fi
+
+	check_drivers_modified
+	ret=$?
+	if [[ $ret -ne 0 ]]; then
+		return $ret
+	fi
+
+	return 0
+}
+
+check_rebuild()
+{
+	local capture_capable_initrd="1"
+	local force_rebuild force_no_rebuild
+	local ret system_modified="0"
+
+	setup_initrd || return 1
+
+	force_no_rebuild=$(kdump_get_conf_val force_no_rebuild)
+	force_no_rebuild=${force_no_rebuild:-0}
+	if [[ $force_no_rebuild != "0" ]] && [[ $force_no_rebuild != "1" ]]; then
+		derror "Error: force_no_rebuild value is invalid"
+		return 1
+	fi
+
+	force_rebuild=$(kdump_get_conf_val force_rebuild)
+	force_rebuild=${force_rebuild:-0}
+	if [[ $force_rebuild != "0" ]] && [[ $force_rebuild != "1" ]]; then
+		derror "Error: force_rebuild value is invalid"
+		return 1
+	fi
+
+	if [[ $force_no_rebuild == "1" && $force_rebuild == "1" ]]; then
+		derror "Error: force_rebuild and force_no_rebuild are enabled simultaneously in kdump.conf"
+		return 1
+	fi
+
+	# Will not rebuild kdump initrd
+	if [[ $force_no_rebuild == "1" ]]; then
+		return 0
+	fi
+
+	#check to see if dependent files has been modified
+	#since last build of the image file
+	if [[ -f $TARGET_INITRD ]]; then
+		image_time=$(stat -c "%Y" "$TARGET_INITRD" 2> /dev/null)
+
+		#in case of fadump mode, check whether the default/target
+		#initrd is already built with dump capture capability
+		if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
+			capture_capable_initrd=$(lsinitrd -f $DRACUT_MODULES_FILE "$TARGET_INITRD" | grep -c -e ^kdumpbase$ -e ^zz-fadumpinit$)
+		fi
+	fi
+
+	check_system_modified
+	ret=$?
+	if [[ $ret -eq 2 ]]; then
+		return 1
+	elif [[ $ret -eq 1 ]]; then
+		system_modified="1"
+	fi
+
+	if [[ $image_time -eq 0 ]]; then
+		dinfo "No kdump initial ramdisk found."
+	elif [[ $capture_capable_initrd == "0" ]]; then
+		dinfo "Rebuild $TARGET_INITRD with dump capture support"
+	elif [[ $force_rebuild != "0" ]]; then
+		dinfo "Force rebuild $TARGET_INITRD"
+	elif [[ $system_modified != "0" ]]; then
+		:
+	else
+		return 0
+	fi
+
+	dinfo "Rebuilding $TARGET_INITRD"
+	rebuild_initrd
+	return $?
+}
+
+# On ppc64le LPARs, the keys trusted by firmware do not end up in
+# .builtin_trusted_keys. So instead, add the key to the .ima keyring
+function load_kdump_kernel_key()
+{
+	# this is only called inside is_secure_boot_enforced,
+	# no need to retest
+
+        # this is only required if DT /ibm,secure-boot is a file.
+        # if it is a dir, we are on OpenPower and don't need this.
+        if ! [[ -f /proc/device-tree/ibm,secure-boot ]]; then
+                return
+        fi
+
+	KDUMP_KEY_ID=$(keyctl padd asymmetric kernelkey-$RANDOM %:.ima < "/usr/share/doc/kernel-keys/$KDUMP_KERNELVER/kernel-signing-ppc.cer")
+}
+
+# remove a previously loaded key. There's no real security implication
+# to leaving it around, we choose to do this because it makes it easier
+# to be idempotent and so as to reduce the potential for confusion.
+function remove_kdump_kernel_key()
+{
+	if [[ -z $KDUMP_KEY_ID ]]; then
+		return
+	fi
+
+	keyctl unlink "$KDUMP_KEY_ID" %:.ima
+}
+
+# Load the kdump kernel specified in /etc/sysconfig/kdump
+# If none is specified, try to load a kdump kernel with the same version
+# as the currently running kernel.
+load_kdump()
+{
+	local ret uki
+
+	KEXEC_ARGS=$(prepare_kexec_args "${KEXEC_ARGS}")
+	KDUMP_COMMANDLINE=$(prepare_cmdline "${KDUMP_COMMANDLINE}" "${KDUMP_COMMANDLINE_REMOVE}" "${KDUMP_COMMANDLINE_APPEND}")
+
+	# For secureboot enabled machines, use new kexec file based syscall.
+	# Old syscall will always fail as it does not have capability to
+	# to kernel signature verification.
+	if is_secure_boot_enforced; then
+		dinfo "Secure Boot is enabled. Using kexec file based syscall."
+		KEXEC_ARGS="$KEXEC_ARGS -s"
+		load_kdump_kernel_key
+	fi
+
+	if is_uki "$KDUMP_KERNEL"; then
+		uki=$KDUMP_KERNEL
+		KDUMP_KERNEL=$KDUMP_TMPDIR/vmlinuz
+		objcopy -O binary --only-section .linux "$uki" "$KDUMP_KERNEL"
+		sync -f "$KDUMP_KERNEL"
+		# Make sure the temp file has the correct SELinux label.
+		# Otherwise starting the kdump.service will fail.
+		chcon -t boot_t "$KDUMP_KERNEL"
+	fi
+
+	ddebug "$KEXEC $KEXEC_ARGS $standard_kexec_args --command-line=$KDUMP_COMMANDLINE --initrd=$TARGET_INITRD $KDUMP_KERNEL"
+
+	# The '12' represents an intermediate temporary file descriptor
+	# to store the standard error file descriptor '2', and later
+	# restore the error file descriptor with the file descriptor '12'
+	# and release it.
+	exec 12>&2
+	exec 2>> $KDUMP_LOG_PATH/kdump.log
+	chmod 600 $KDUMP_LOG_PATH/kdump.log
+	PS4='+ $(date "+%Y-%m-%d %H:%M:%S") ${BASH_SOURCE}@${LINENO}: '
+	set -x
+
+	# shellcheck disable=SC2086
+	$KEXEC $KEXEC_ARGS $standard_kexec_args \
+		--command-line="$KDUMP_COMMANDLINE" \
+		--initrd="$TARGET_INITRD" "$KDUMP_KERNEL"
+
+	ret=$?
+	set +x
+	exec 2>&12 12>&-
+
+	remove_kdump_kernel_key
+
+	if [[ $ret == 0 ]]; then
+		dinfo "kexec: loaded kdump kernel"
+		return 0
+	else
+		derror "kexec: failed to load kdump kernel"
+		return 1
+	fi
+}
+
+check_ssh_config()
+{
+	local SSH_TARGET
+
+	while read -r config_opt config_val; do
+		case "$config_opt" in
+		sshkey)
+			# remove inline comments after the end of a directive.
+			if [[ -f $config_val ]]; then
+				# canonicalize the path
+				SSH_KEY_LOCATION=$(/usr/bin/readlink -m "$config_val")
+			else
+				dwarn "WARNING: '$config_val' doesn't exist, using default value '$SSH_KEY_LOCATION'"
+			fi
+			;;
+		path)
+			SAVE_PATH=$config_val
+			;;
+		ssh)
+			DUMP_TARGET=$config_val
+			;;
+		*) ;;
+
+		esac
+	done <<< "$(kdump_read_conf)"
+
+	#make sure they've configured kdump.conf for ssh dumps
+	SSH_TARGET=$(echo -n "$DUMP_TARGET" | sed -n '/.*@/p')
+	if [[ -z $SSH_TARGET ]]; then
+		return 1
+	fi
+	return 0
+}
+
+# ipv6 host address may takes a long time to be ready.
+# Instead of checking against ipv6 address, we just check the network reachable
+# by the return val of 'ssh'
+check_and_wait_network_ready()
+{
+	local start_time
+	local warn_once=1
+	local cur
+	local diff
+	local retval
+	local errmsg
+
+	start_time=$(date +%s)
+	while true; do
+		errmsg=$(ssh -i "$SSH_KEY_LOCATION" -o BatchMode=yes "$DUMP_TARGET" mkdir -p "$SAVE_PATH" 2>&1)
+		retval=$?
+
+		# ssh exits with the exit status of the remote command or with 255 if an error occurred
+		if [[ $retval -eq 0 ]]; then
+			return 0
+		elif [[ $retval -ne 255 ]]; then
+			derror "Could not create $DUMP_TARGET:$SAVE_PATH, you should check the privilege on server side"
+			return 1
+		fi
+
+		# if server removes the authorized_keys or, no /root/.ssh/kdump_id_rsa
+		ddebug "$errmsg"
+		if echo "$errmsg" | grep -q "Permission denied\|No such file or directory\|Host key verification failed"; then
+			derror "Could not create $DUMP_TARGET:$SAVE_PATH, you probably need to run \"kdumpctl propagate\""
+			return 1
+		fi
+
+		if [[ $warn_once -eq 1 ]]; then
+			dwarn "Network dump target is not usable, waiting for it to be ready..."
+			warn_once=0
+		fi
+
+		cur=$(date +%s)
+		diff=$((cur - start_time))
+		# 60s time out
+		if [[ $diff -gt 180 ]]; then
+			break
+		fi
+		sleep 1
+	done
+
+	dinfo "Could not create $DUMP_TARGET:$SAVE_PATH, ipaddr is not ready yet. You should check network connection"
+	return 1
+}
+
+check_ssh_target()
+{
+	check_and_wait_network_ready
+}
+
+propagate_ssh_key()
+{
+	if ! check_ssh_config; then
+		derror "No ssh config specified in $KDUMP_CONFIG_FILE.  Can't propagate"
+		exit 1
+	fi
+
+	local KEYFILE=$SSH_KEY_LOCATION
+	local errmsg="Failed to propagate ssh key"
+
+	#Check to see if we already created key, if not, create it.
+	if [[ -f $KEYFILE ]]; then
+		dinfo "Using existing keys..."
+	else
+		dinfo "Generating new ssh keys... "
+		/usr/bin/ssh-keygen -t rsa -f "$KEYFILE" -N "" 2>&1 > /dev/null
+		dinfo "done."
+	fi
+
+	#now find the target ssh user and server to contact.
+	SSH_USER=$(echo "$DUMP_TARGET" | cut -d@ -f1)
+	SSH_SERVER=$(echo "$DUMP_TARGET" | sed -e's/\(.*@\)\(.*$\)/\2/')
+
+	#now send the found key to the found server
+	ssh-copy-id -i "$KEYFILE" "$SSH_USER@$SSH_SERVER"
+	RET=$?
+	if [[ $RET == 0 ]]; then
+		dinfo "$KEYFILE has been added to ~$SSH_USER/.ssh/authorized_keys on $SSH_SERVER"
+		return 0
+	else
+		derror "$errmsg, $KEYFILE failed in transfer to $SSH_SERVER"
+		exit 1
+	fi
+}
+
+show_reserved_mem()
+{
+	local mem
+	local mem_mb
+
+	mem=$(< /sys/kernel/kexec_crash_size)
+	mem_mb=$((mem / 1024 / 1024))
+
+	dinfo "Reserved ${mem_mb}MB memory for crash kernel"
+}
+
+check_current_fadump_status()
+{
+	# Check if firmware-assisted dump has been registered.
+	rc=$(< $FADUMP_REGISTER_SYS_NODE)
+	[[ $rc -eq 1 ]] && return 0
+	return 1
+}
+
+check_current_status()
+{
+	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
+		check_current_fadump_status
+	else
+		check_current_kdump_status
+	fi
+
+	return $?
+}
+
+save_raw()
+{
+	local kdump_dir
+	local raw_target
+
+	raw_target=$(kdump_get_conf_val raw)
+	[[ -z $raw_target ]] && return 0
+	[[ -b $raw_target ]] || {
+		derror "raw partition $raw_target not found"
+		return 1
+	}
+	check_fs=$(lsblk --nodeps -npo FSTYPE "$raw_target")
+	if [[ $(echo "$check_fs" | wc -w) -ne 0 ]]; then
+		dwarn "Warning: Detected '$check_fs' signature on $raw_target, data loss is expected."
+		return 0
+	fi
+	kdump_dir=$(kdump_get_conf_val path)
+	if [[ -z ${kdump_dir} ]]; then
+		coredir="/var/crash/$(date +"%Y-%m-%d-%H:%M")"
+	else
+		coredir="${kdump_dir}/$(date +"%Y-%m-%d-%H:%M")"
+	fi
+
+	mkdir -p "$coredir"
+	[[ -d $coredir ]] || {
+		derror "failed to create $coredir"
+		return 1
+	}
+	if makedumpfile -R "$coredir/vmcore" < "$raw_target" > /dev/null 2>&1; then
+		# dump found
+		dinfo "Dump saved to $coredir/vmcore"
+		# wipe makedumpfile header
+		dd if=/dev/zero of="$raw_target" bs=1b count=1 2> /dev/null
+	else
+		rm -rf "$coredir"
+	fi
+
+	return 0
+}
+
+local_fs_dump_target()
+{
+	local _target
+
+	if _target=$(grep -E "^ext[234]|^xfs|^btrfs|^minix" /etc/kdump.conf); then
+		echo "$_target" | awk '{print $2}'
+	fi
+}
+
+path_to_be_relabeled()
+{
+	local _path _target _mnt="/" _rmnt
+
+	if is_user_configured_dump_target; then
+		if is_mount_in_dracut_args; then
+			return
+		fi
+
+		_target=$(local_fs_dump_target)
+		if [[ -n $_target ]]; then
+			_mnt=$(get_mntpoint_from_target "$_target")
+			if ! is_mounted "$_mnt"; then
+				return
+			fi
+		else
+			return
+		fi
+	fi
+
+	_path=$(get_save_path)
+	# if $_path is masked by other mount, we will not relabel it.
+	_rmnt=$(df "$_mnt/$_path" 2> /dev/null | tail -1 | awk '{ print $NF }')
+	if [[ $_rmnt == "$_mnt" ]]; then
+		echo "$_mnt/$_path"
+	fi
+}
+
+selinux_relabel()
+{
+	local _path _i _attr
+
+	_path=$(path_to_be_relabeled)
+	if [[ -z $_path ]] || ! [[ -d $_path ]]; then
+		return
+	fi
+
+	while IFS= read -r -d '' _i; do
+		_attr=$(getfattr -m "security.selinux" "$_i" 2> /dev/null)
+		if [[ -z $_attr ]]; then
+			restorecon "$_i"
+		fi
+	done < <(find "$_path" -print0)
+}
+
+check_fence_kdump_config()
+{
+	local hostname
+	local ipaddrs
+	local nodes
+
+	hostname=$(hostname)
+	ipaddrs=$(hostname -I)
+	nodes=$(kdump_get_conf_val "fence_kdump_nodes")
+
+	for node in $nodes; do
+		if [[ $node == "$hostname" ]]; then
+			derror "Option fence_kdump_nodes cannot contain $hostname"
+			return 1
+		fi
+		# node can be ipaddr
+		if echo "$ipaddrs " | grep -q "$node "; then
+			derror "Option fence_kdump_nodes cannot contain $node"
+			return 1
+		fi
+	done
+
+	return 0
+}
+
+check_dump_feasibility()
+{
+	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
+		return 0
+	fi
+
+	check_kdump_feasibility
+	return $?
+}
+
+start_fadump()
+{
+	echo 1 > $FADUMP_REGISTER_SYS_NODE
+	if ! check_current_fadump_status; then
+		derror "fadump: failed to register"
+		return 1
+	fi
+
+	dinfo "fadump: registered successfully"
+	return 0
+}
+
+start_dump()
+{
+	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
+		start_fadump
+	else
+		load_kdump
+	fi
+
+	return $?
+}
+
+check_failure_action_config()
+{
+	local default_option
+	local failure_action
+	local option="failure_action"
+
+	default_option=$(kdump_get_conf_val default)
+	failure_action=$(kdump_get_conf_val failure_action)
+
+	if [[ -z $failure_action ]] && [[ -z $default_option ]]; then
+		return 0
+	elif [[ -n $failure_action ]] && [[ -n $default_option ]]; then
+		derror "Cannot specify 'failure_action' and 'default' option together"
+		return 1
+	fi
+
+	if [[ -n $default_option ]]; then
+		option="default"
+		failure_action="$default_option"
+	fi
+
+	case "$failure_action" in
+	reboot | halt | poweroff | shell | dump_to_rootfs)
+		return 0
+		;;
+	*)
+		dinfo $"Usage kdump.conf: $option {reboot|halt|poweroff|shell|dump_to_rootfs}"
+		return 1
+		;;
+	esac
+}
+
+check_final_action_config()
+{
+	local final_action
+
+	final_action=$(kdump_get_conf_val final_action)
+	if [[ -z $final_action ]]; then
+		return 0
+	else
+		case "$final_action" in
+		reboot | halt | poweroff)
+			return 0
+			;;
+		*)
+			dinfo $"Usage kdump.conf: final_action {reboot|halt|poweroff}"
+			return 1
+			;;
+		esac
+	fi
+}
+
+start()
+{
+	if ! check_dump_feasibility; then
+		derror "Starting kdump: [FAILED]"
+		return 1
+	fi
+
+	if ! check_config; then
+		derror "Starting kdump: [FAILED]"
+		return 1
+	fi
+
+	if sestatus 2> /dev/null | grep -q "SELinux status.*enabled"; then
+		selinux_relabel
+	fi
+
+	if ! save_raw; then
+		derror "Starting kdump: [FAILED]"
+		return 1
+	fi
+
+	if [[ $DEFAULT_DUMP_MODE == "kdump" ]] && check_current_kdump_status; then
+		dwarn "Kdump already running: [WARNING]"
+		return 0
+	fi
+
+	if check_ssh_config; then
+		if ! check_ssh_target; then
+			derror "Starting kdump: [FAILED]"
+			return 1
+		fi
+	fi
+
+	if ! check_rebuild; then
+		derror "Starting kdump: [FAILED]"
+		return 1
+	fi
+
+	if ! start_dump; then
+		derror "Starting kdump: [FAILED]"
+		return 1
+	fi
+
+	dinfo "Starting kdump: [OK]"
+}
+
+reload()
+{
+	if ! check_current_status; then
+		dwarn "Kdump was not running: [WARNING]"
+	fi
+
+	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
+		reload_fadump
+		return $?
+	else
+		if ! stop_kdump; then
+			derror "Stopping kdump: [FAILED]"
+			return 1
+		fi
+	fi
+
+	dinfo "Stopping kdump: [OK]"
+
+	if ! setup_initrd; then
+		derror "Starting kdump: [FAILED]"
+		return 1
+	fi
+
+	if ! start_dump; then
+		derror "Starting kdump: [FAILED]"
+		return 1
+	fi
+
+	dinfo "Starting kdump: [OK]"
+}
+
+stop_fadump()
+{
+	echo 0 > $FADUMP_REGISTER_SYS_NODE
+	if check_current_fadump_status; then
+		derror "fadump: failed to unregister"
+		return 1
+	fi
+
+	dinfo "fadump: unregistered successfully"
+	return 0
+}
+
+stop_kdump()
+{
+	if is_secure_boot_enforced; then
+		$KEXEC -s -p -u
+	else
+		$KEXEC -p -u
+	fi
+
+	# shellcheck disable=SC2181
+	if [[ $? != 0 ]]; then
+		derror "kexec: failed to unload kdump kernel"
+		return 1
+	fi
+
+	dinfo "kexec: unloaded kdump kernel"
+	return 0
+}
+
+reload_fadump()
+{
+	if echo 1 > $FADUMP_REGISTER_SYS_NODE; then
+		dinfo "fadump: re-registered successfully"
+		return 0
+	else
+		# FADump could fail on older kernel where re-register
+		# support is not enabled. Try stop/start from userspace
+		# to handle such scenario.
+		if stop_fadump; then
+			start_fadump
+			return $?
+		fi
+	fi
+
+	return 1
+}
+
+stop()
+{
+	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
+		stop_fadump
+	else
+		stop_kdump
+	fi
+
+	# shellcheck disable=SC2181
+	if [[ $? != 0 ]]; then
+		derror "Stopping kdump: [FAILED]"
+		return 1
+	fi
+
+	dinfo "Stopping kdump: [OK]"
+	return 0
+}
+
+rebuild()
+{
+	check_config || return 1
+
+	if check_ssh_config; then
+		if ! check_ssh_target; then
+			return 1
+		fi
+	fi
+
+	setup_initrd || return 1
+
+	dinfo "Rebuilding $TARGET_INITRD"
+	rebuild_initrd
+	return $?
+}
+
+check_vmlinux()
+{
+	# Use readelf to check if it's a valid ELF
+	readelf -h "$1" &> /dev/null || return 1
+}
+
+get_vmlinux_size()
+{
+	local size=0 _msize
+
+	while read -r _msize; do
+		size=$((size + _msize))
+	done <<< "$(readelf -l -W "$1" | awk '/^  LOAD/{print $6}' 2> /dev/stderr)"
+
+	echo $size
+}
+
+try_decompress()
+{
+	# The obscure use of the "tr" filter is to work around older versions of
+	# "grep" that report the byte offset of the line instead of the pattern.
+
+	# Try to find the header ($1) and decompress from here
+	for pos in $(tr "$1\n$2" "\n$2=" < "$4" | grep -abo "^$2"); do
+		if ! type -P "$3" > /dev/null; then
+			ddebug "Signiature detected but '$3' is missing, skip this decompressor"
+			break
+		fi
+
+		pos=${pos%%:*}
+		tail "-c+$pos" "$img" | $3 > "$5" 2> /dev/null
+		if check_vmlinux "$5"; then
+			ddebug "Kernel is extracted with '$3'"
+			return 0
+		fi
+	done
+
+	return 1
+}
+
+# Borrowed from linux/scripts/extract-vmlinux
+get_kernel_size()
+{
+	# Prepare temp files:
+	local tmp img=$1
+
+	tmp="$KDUMP_TMPDIR/vmlinux"
+
+	# Try to check if it's a vmlinux already
+	check_vmlinux "$img" && get_vmlinux_size "$img" && return 0
+
+	# That didn't work, so retry after decompression.
+	try_decompress '\037\213\010' xy gunzip "$img" "$tmp" ||
+		try_decompress '\3757zXZ\000' abcde unxz "$img" "$tmp" ||
+		try_decompress 'BZh' xy bunzip2 "$img" "$tmp" ||
+		try_decompress '\135\0\0\0' xxx unlzma "$img" "$tmp" ||
+		try_decompress '\211\114\132' xy 'lzop -d' "$img" "$tmp" ||
+		try_decompress '\002!L\030' xxx 'lz4 -d' "$img" "$tmp" ||
+		try_decompress '(\265/\375' xxx unzstd "$img" "$tmp"
+
+	# Finally check for uncompressed images or objects:
+	[[ $? -eq 0 ]] && get_vmlinux_size "$tmp" && return 0
+
+	# Fallback to use iomem
+	local _size=0 _seg
+	while read -r _seg; do
+		_size=$((_size + 0x${_seg#*-} - 0x${_seg%-*}))
+	done <<< "$(grep -E "Kernel (code|rodata|data|bss)" /proc/iomem | cut -d ":" -f 1)"
+	echo $_size
+}
+
+do_estimate()
+{
+	local kdump_mods
+	local -A large_mods
+	local baseline
+	local kernel_size mod_size initrd_size baseline_size runtime_size reserved_size estimated_size recommended_size _cryptsetup_overhead
+	local size_mb=$((1024 * 1024))
+
+	setup_initrd
+	if [[ ! -f $TARGET_INITRD ]]; then
+		derror "kdumpctl estimate: kdump initramfs is not built yet."
+		exit 1
+	fi
+
+	kdump_mods="$(lsinitrd "$TARGET_INITRD" -f /usr/lib/dracut/hostonly-kernel-modules.txt | tr '\n' ' ')"
+	baseline=$(kdump_get_arch_recommend_size)
+	if [[ ${baseline: -1} == "M" ]]; then
+		baseline=${baseline%M}
+	elif [[ ${baseline: -1} == "G" ]]; then
+		baseline=$((${baseline%G} * 1024))
+	elif [[ ${baseline: -1} == "T" ]]; then
+		baseline=$((${baseline%Y} * 1048576))
+	fi
+
+	# The default pre-reserved crashkernel value
+	baseline_size=$((baseline * size_mb))
+	# Current reserved crashkernel size
+	reserved_size=$(< /sys/kernel/kexec_crash_size)
+	# A pre-estimated value for userspace usage and kernel
+	# runtime allocation, 64M should good for most cases
+	runtime_size=$((64 * size_mb))
+	# Kernel image size
+	kernel_size=$(get_kernel_size "$KDUMP_KERNEL")
+	# Kdump initramfs size
+	initrd_size=$(du -b "$TARGET_INITRD" | awk '{print $1}')
+	# Kernel modules static size after loaded
+	mod_size=0
+	while read -r _name _size _; do
+		if [[ " $kdump_mods " != *" $_name "* ]]; then
+			continue
+		fi
+		mod_size=$((mod_size + _size))
+
+		# Mark module with static size larger than 2M as large module
+		if [[ $((_size / size_mb)) -ge 1 ]]; then
+			large_mods[$_name]=$_size
+		fi
+	done <<< "$(< /proc/modules)"
+
+	# Extra memory usage required for LUKS2 decryption
+	crypt_size=0
+	for _dev in $(get_all_kdump_crypt_dev); do
+		_crypt_info=$(cryptsetup luksDump "/dev/block/$_dev")
+		[[ $(echo "$_crypt_info" | sed -n "s/^Version:\s*\(.*\)/\1/p") == "2" ]] || continue
+		for _mem in $(echo "$_crypt_info" | sed -n "s/\sMemory:\s*\(.*\)/\1/p" | sort -n -r); do
+			crypt_size=$((crypt_size + _mem * 1024))
+			break
+		done
+	done
+
+	if [[ $crypt_size -ne 0 ]]; then
+		if [[ $(uname -m) == aarch64 ]]; then
+			_cryptsetup_overhead=50
+		else
+			_cryptsetup_overhead=20
+		fi
+
+		crypt_size=$((crypt_size + _cryptsetup_overhead * size_mb))
+		echo -e "Encrypted kdump target requires extra memory, assuming using the keyslot with maximum memory requirement\n"
+	fi
+
+	estimated_size=$((kernel_size + mod_size + initrd_size + runtime_size + crypt_size))
+	if [[ $baseline_size -gt $estimated_size ]]; then
+		recommended_size=$baseline_size
+	else
+		recommended_size=$estimated_size
+	fi
+
+	echo "Reserved crashkernel:    $((reserved_size / size_mb))M"
+	echo "Recommended crashkernel: $((recommended_size / size_mb))M"
+	echo
+	echo "Kernel image size:   $((kernel_size / size_mb))M"
+	echo "Kernel modules size: $((mod_size / size_mb))M"
+	echo "Initramfs size:      $((initrd_size / size_mb))M"
+	echo "Runtime reservation: $((runtime_size / size_mb))M"
+	[[ $crypt_size -ne 0 ]] &&
+		echo "LUKS required size:  $((crypt_size / size_mb))M"
+	echo -n "Large modules:"
+	if [[ ${#large_mods[@]} -eq 0 ]]; then
+		echo " <none>"
+	else
+		echo ""
+		for _mod in "${!large_mods[@]}"; do
+			echo "    $_mod: ${large_mods[$_mod]}"
+		done
+	fi
+
+	if [[ $reserved_size -lt $recommended_size ]]; then
+		echo "WARNING: Current crashkernel size is lower than recommended size $((recommended_size / size_mb))M."
+	fi
+}
+
+get_default_crashkernel()
+{
+	local _dump_mode=$1
+
+	kdump_get_arch_recommend_crashkernel "$_dump_mode"
+}
+
+# Read kernel cmdline parameter for a specific kernel
+# $1: kernel path, DEFAULT or kernel path, ALL not accepted
+# $2: kernel cmldine parameter
+get_grub_kernel_boot_parameter()
+{
+	local _kernel_path=$1 _para=$2
+
+	[[ $_kernel_path == ALL ]] && derror "kernel_path=ALL invalid for get_grub_kernel_boot_parameter" && return 1
+	grubby --info="$_kernel_path" | sed -En -e "/^args=.*$/{s/^.*(\s|\")${_para}=(\S*).*\"$/\2/p;q}"
+}
+
+# get dump mode by fadump value
+# return
+#  - fadump, if fadump=on or fadump=nocma
+#  - kdump, if fadump=off or empty fadump, return kdump
+#  - error if otherwise
+get_dump_mode_by_fadump_val()
+{
+	local _fadump_val=$1
+
+	if [[ -z $_fadump_val ]] || [[ $_fadump_val == off ]]; then
+		echo -n kdump
+	elif [[ $_fadump_val == on ]] || [[ $_fadump_val == nocma ]]; then
+		echo -n fadump
+	else
+		derror "invalid fadump=$_fadump_val"
+		return 1
+	fi
+}
+
+# get dump mode of a specific kernel
+# based on its fadump kernel cmdline parameter
+get_dump_mode_by_kernel()
+{
+	local _kernel_path=$1 _fadump_val _dump_mode
+
+	_fadump_val=$(get_grub_kernel_boot_parameter "$_kernel_path" fadump)
+	if _dump_mode=$(get_dump_mode_by_fadump_val "$_fadump_val"); then
+		echo -n "$_dump_mode"
+	else
+		derror "failed to get dump mode for kernel $_kernel_path"
+		exit
+	fi
+}
+
+_filter_grubby_kernel_str()
+{
+	local _grubby_kernel_str=$1
+	echo -n "$_grubby_kernel_str" | sed -n -e 's/^kernel="\(.*\)"/\1/p'
+}
+
+_find_kernel_path_by_release()
+{
+	local _release="$1" _grubby_kernel_str _kernel_path
+
+	# Insert '/' before '+' to cope with grep's EREs
+	_release=${_release//+/\\+}
+	_grubby_kernel_str=$(grubby --info ALL | grep -E "^kernel=.*$_release(\/\w+)?\"$")
+	_kernel_path=$(_filter_grubby_kernel_str "$_grubby_kernel_str")
+	if [[ -z $_kernel_path ]]; then
+		ddebug "kernel $_release doesn't exist"
+		return 1
+	fi
+	echo -n "$_kernel_path"
+}
+
+_get_current_running_kernel_path()
+{
+	local _release _path
+
+	_release=$(uname -r)
+	if _path=$(_find_kernel_path_by_release "$_release"); then
+		echo -n "$_path"
+	else
+		return 1
+	fi
+}
+
+_update_kernel_cmdline()
+{
+	local _kernel_path=$1 _crashkernel=$2 _dump_mode=$3 _fadump_val=$4
+
+	if is_ostree; then
+		if rpm-ostree kargs | grep -q "crashkernel="; then
+			rpm-ostree kargs --replace="crashkernel=$_crashkernel"
+		else
+			rpm-ostree kargs --append="crashkernel=$_crashkernel"
+		fi
+	else
+		grubby --args "crashkernel=$_crashkernel" --update-kernel "$_kernel_path"
+		if [[ $_dump_mode == kdump ]]; then
+			grubby --remove-args="fadump" --update-kernel "$_kernel_path"
+		else
+			grubby --args="fadump=$_fadump_val" --update-kernel "$_kernel_path"
+		fi
+	fi
+	[[ -f /etc/zipl.conf ]] && zipl > /dev/null
+}
+
+_valid_grubby_kernel_path()
+{
+	[[ -n "$1" ]] && grubby --info="$1" > /dev/null 2>&1
+}
+
+# return all the kernel paths given a grubby kernel-path
+#
+# $1: kernel path accepted by grubby, e.g. DEFAULT, ALL,
+#     /boot/vmlinuz-`uname -r`
+# return: kernel paths separated by space
+_get_all_kernels_from_grubby()
+{
+	local _kernels _line _kernel_path _grubby_kernel_path=$1
+
+	for _line in $(grubby --info "$_grubby_kernel_path" | grep "^kernel="); do
+		_kernel_path=$(_filter_grubby_kernel_str "$_line")
+		_kernels="$_kernels $_kernel_path"
+	done
+	echo -n "$_kernels"
+}
+
+GRUB_ETC_DEFAULT="/etc/default/grub"
+# Update a kernel parameter in default grub conf
+#
+# If a value is specified, it will be inserted in the end. Otherwise it
+# would remove given kernel parameter.
+#
+# Note this function doesn't address the following cases,
+# 1. The kernel ignores everything on the command line after a '--'. So
+#    simply adding the new entry to the end will fail if the cmdline
+#    contains a --.
+# 2. If the value for a parameter contains spaces it can be quoted using
+#    double quotes, for example param="value with spaces". This will
+#    break the [^[:space:]\"] regex for the value.
+# 3. Dashes and underscores in the parameter name are equivalent. So
+#    some_parameter and some-parameter are identical.
+# 4. Some parameters, e.g. efivar_ssdt, can be given multiple times.
+# 5. Some kernel parameters, e.g. quiet, doesn't have value
+#
+# $1: the name of the kernel command line parameter
+# $2: new value. If empty, given parameter would be removed
+_update_kernel_arg_in_grub_etc_default()
+{
+	local _para=$1 _val=$2 _para_val
+
+	if [[ $(uname -m) == s390x ]]; then
+		return
+	fi
+
+	if [[ -n $_val ]]; then
+		_para_val="$_para=$_val"
+	fi
+
+	# Update the command line /etc/default/grub, i.e.
+	# on the line that starts with 'GRUB_CMDLINE_LINUX=',
+	#       1) remove $para=$val if the it's the first arg
+	#       2) remove all occurences of $para=$val
+	#       3) insert $_para_val to end
+	#       4) remove duplicate spaces left over by 1) or 2) or 3)
+	#       5) remove space at the beginning of the string left over by 1) or 2) or 3)
+	#       6) remove space at the end of the string left over by 1) or 2) or 3)
+	sed -i -E "/^GRUB_CMDLINE_LINUX=/ {
+         s/\"${_para}=[^[:space:]\"]*/\"/g;
+         s/[[:space:]]+${_para}=[^[:space:]\"]*/ /g;
+         s/\"$/ ${_para_val}\"/
+         s/[[:space:]]+/ /g;
+         s/(\")[[:space:]]+/\1/g;
+         s/[[:space:]]+(\")/\1/g;
+         }" "$GRUB_ETC_DEFAULT"
+}
+
+# Read the kernel arg in default grub conf.
+
+# Note reading a kernel parameter that doesn't have a value isn't supported.
+#
+# $1: the name of the kernel command line parameter
+_read_kernel_arg_in_grub_etc_default()
+{
+	sed -n -E "s/^GRUB_CMDLINE_LINUX=.*[[:space:]\"]${1}=([^[:space:]\"]*).*$/\1/p" "$GRUB_ETC_DEFAULT"
+}
+
+reset_crashkernel()
+{
+	local _opt _val _dump_mode _fadump_val _reboot _grubby_kernel_path _kernel _kernels
+	local _old_crashkernel _new_crashkernel _new_dump_mode _crashkernel_changed
+	local _new_fadump_val _old_fadump_val _what_is_updated
+
+	for _opt in "$@"; do
+		case "$_opt" in
+			--fadump=*)
+				_val=${_opt#*=}
+				if _dump_mode=$(get_dump_mode_by_fadump_val $_val); then
+					_fadump_val=$_val
+				else
+					derror "failed to determine dump mode"
+					exit
+				fi
+				;;
+			--kernel=*)
+				_val=${_opt#*=}
+				if ! _valid_grubby_kernel_path $_val; then
+					derror "Invalid $_opt, please specify a valid kernel path, ALL or DEFAULT"
+					exit
+				fi
+				_grubby_kernel_path=$_val
+				;;
+			--reboot)
+				_reboot=yes
+				;;
+			*)
+				derror "$_opt not recognized"
+				exit 1
+				;;
+		esac
+	done
+
+	# 1. OSTree systems use "rpm-ostree kargs" instead of grubby to manage kernel command
+	#    line. --kernel=ALL doesn't make sense for OStree.
+	# 2. We don't have any OSTree POWER systems so the dump mode is always kdump.
+	# 3. "rpm-ostree kargs" would prompt the user to reboot the system after
+	#    modifying the kernel command line so there is no need for kexec-tools
+	#    to repeat it.
+	if is_ostree; then
+		_old_crashkernel=$(rpm-ostree kargs | sed -n -E 's/.*(^|\s)crashkernel=(\S*).*/\2/p')
+		_new_dump_mode=kdump
+		_new_crashkernel=$(kdump_get_arch_recommend_crashkernel "$_new_dump_mode")
+		if [[ $_old_crashkernel != "$_new_crashkernel" ]]; then
+			_update_kernel_cmdline "" "$_new_crashkernel" "$_new_dump_mode" ""
+			if [[ $_reboot == yes ]]; then
+				systemctl reboot
+			fi
+		fi
+		return
+	fi
+
+	# For non-ppc64le systems, the dump mode is always kdump since only ppc64le
+	# has FADump.
+	if [[ -z $_dump_mode && $(uname -m) != ppc64le ]]; then
+		_dump_mode=kdump
+		_fadump_val=off
+	fi
+
+	# If the dump mode is determined, we can also know the default crashkernel value
+	if [[ -n $_dump_mode ]]; then
+		_crashkernel=$(kdump_get_arch_recommend_crashkernel "$_dump_mode")
+	fi
+
+	# If --kernel-path=ALL, update GRUB_CMDLINE_LINUX in /etc/default/grub.
+	#
+	# An exception case is when the ppc64le user doesn't specify the fadump value.
+	# In this case, the dump mode would be determined by parsing the kernel
+	# command line of the kernel(s) to be updated thus don't update GRUB_CMDLINE_LINUX.
+	#
+	# The following code has been simplified because of what has been done early,
+	#   - set the dump mode as kdump for non-ppc64le cases
+	#   - retrieved the default crashkernel value for given dump mode
+	if [[ $_grubby_kernel_path == ALL && -n $_dump_mode ]]; then
+		_update_kernel_arg_in_grub_etc_default crashkernel "$_crashkernel"
+		# remove the fadump if fadump is disabled
+		if [[ $_fadump_val == off ]]; then
+			_fadump_val=""
+		fi
+		_update_kernel_arg_in_grub_etc_default fadump "$_fadump_val"
+	fi
+
+	# If kernel-path not specified, either
+	#  - use KDUMP_KERNELVER if it's defined
+	#  - use current running kernel
+	if [[ -z $_grubby_kernel_path ]]; then
+		if [[ -z $KDUMP_KERNELVER ]] ||
+			! _kernel_path=$(_find_kernel_path_by_release "$KDUMP_KERNELVER"); then
+					if ! _kernel_path=$(_get_current_running_kernel_path); then
+						derror "no running kernel found"
+						exit 1
+					fi
+		fi
+		_kernels=$_kernel_path
+	else
+		_kernels=$(_get_all_kernels_from_grubby "$_grubby_kernel_path")
+	fi
+
+	for _kernel in $_kernels; do
+		if [[ -z $_dump_mode ]]; then
+			_new_dump_mode=$(get_dump_mode_by_kernel "$_kernel")
+			_new_crashkernel=$(kdump_get_arch_recommend_crashkernel "$_new_dump_mode")
+			_new_fadump_val=$(get_grub_kernel_boot_parameter "$_kernel" fadump)
+		else
+			_new_dump_mode=$_dump_mode
+			_new_crashkernel=$_crashkernel
+			_new_fadump_val=$_fadump_val
+		fi
+
+		_old_crashkernel=$(get_grub_kernel_boot_parameter "$_kernel" crashkernel)
+		_old_fadump_val=$(get_grub_kernel_boot_parameter "$_kernel" fadump)
+		if [[ $_old_crashkernel != "$_new_crashkernel" || $_old_fadump_val != "$_new_fadump_val" ]]; then
+			_update_kernel_cmdline "$_kernel" "$_new_crashkernel" "$_new_dump_mode" "$_new_fadump_val"
+			if [[ $_reboot != yes ]]; then
+				if [[ $_old_crashkernel != "$_new_crashkernel" ]]; then
+					_what_is_updated="Updated crashkernel=$_new_crashkernel"
+				else
+					# This case happens only when switching between fadump=on and fadump=nocma
+					_what_is_updated="Updated fadump=$_new_fadump_val"
+				fi
+				dwarn "$_what_is_updated for kernel=$_kernel. Please reboot the system for the change to take effect."
+			fi
+			_crashkernel_changed=yes
+		fi
+	done
+
+	if [[ $_reboot == yes && $_crashkernel_changed == yes ]]; then
+		reboot
+	fi
+}
+
+_is_bootloader_installed()
+{
+	if [[ $(uname -m) == s390x ]]; then
+		test -f /etc/zipl.conf
+	else
+		test -f /boot/grub2/grub.cfg
+	fi
+}
+
+_update_crashkernel()
+{
+	local _kernel _kver _dump_mode _old_default_crashkernel _new_default_crashkernel _fadump_val _msg
+
+	_kernel=$1
+	_dump_mode=$(get_dump_mode_by_kernel "$_kernel")
+	_old_default_crashkernel=$(get_grub_kernel_boot_parameter "$_kernel" crashkernel)
+	_kver=$(parse_kver_from_path "$_kernel")
+	# The second argument is for the case of aarch64, where installing a 64k variant on a 4k kernel, or vice versa
+	_new_default_crashkernel=$(kdump_get_arch_recommend_crashkernel "$_dump_mode" "$_kver")
+	if [[ $_old_default_crashkernel != "$_new_default_crashkernel" ]]; then
+		_fadump_val=$(get_grub_kernel_boot_parameter "$_kernel" fadump)
+		if _update_kernel_cmdline "$_kernel" "$_new_default_crashkernel" "$_dump_mode" "$_fadump_val"; then
+			_msg="For kernel=$_kernel, crashkernel=$_new_default_crashkernel now. Please reboot the system for the change to take effet."
+			_msg+=" Note if you don't want kexec-tools to manage the crashkernel kernel parameter, please set auto_reset_crashkernel=no in /etc/kdump.conf."
+			dinfo "$_msg"
+		fi
+	fi
+}
+
+
+# shellcheck disable=SC2154 # false positive when dereferencing an array
+reset_crashkernel_after_update()
+{
+	local _kernel
+
+	if ! _is_bootloader_installed; then
+		return
+	fi
+
+	for _kernel in $(_get_all_kernels_from_grubby ALL); do
+		_update_crashkernel "$_kernel"
+	done
+}
+
+# read the value of an environ variable from given environ file path
+#
+# The environment variable entries in /proc/[pid]/environ are separated
+# by null bytes instead of by spaces.
+#
+# $1: environment variable
+# $2: environ file path
+read_proc_environ_var()
+{
+	local _var=$1 _environ_path=$2
+	sed -n -E "s/.*(^|\x00)${_var}=([^\x00]*).*/\2/p" < "$_environ_path"
+}
+
+_OSBUILD_ENVIRON_PATH='/proc/1/environ'
+_is_osbuild()
+{
+	[[ $(read_proc_environ_var container "$_OSBUILD_ENVIRON_PATH") == bwrap-osbuild ]]
+}
+
+reset_crashkernel_for_installed_kernel()
+{
+	local _installed_kernel
+
+	# During package install, only try to reset crashkernel for osbuild
+	# thus to avoid calling grubby when installing os via anaconda
+	if ! _is_bootloader_installed && ! _is_osbuild; then
+		return
+	fi
+
+	if ! _installed_kernel=$(_find_kernel_path_by_release "$1"); then
+		exit 1
+	fi
+
+	if _is_osbuild; then
+		if ! grep -qs crashkernel= /etc/kernel/cmdline; then
+			reset_crashkernel "--kernel=$_installed_kernel"
+		fi
+		return
+	fi
+
+	_update_crashkernel "$_installed_kernel"
+}
+
+if [[ ! -f $KDUMP_CONFIG_FILE ]]; then
+	derror "Error: No kdump config file found!"
+	exit 1
+fi
+
+main()
+{
+	# Determine if the dump mode is kdump or fadump
+	determine_dump_mode
+
+	case "$1" in
+	start)
+		if [[ -s /proc/vmcore ]]; then
+			save_core
+			reboot
+		else
+			start
+		fi
+		;;
+	stop)
+		stop
+		;;
+	status)
+		EXIT_CODE=0
+		check_current_status
+		case "$?" in
+		0)
+			dinfo "Kdump is operational"
+			EXIT_CODE=0
+			;;
+		1)
+			dinfo "Kdump is not operational"
+			EXIT_CODE=3
+			;;
+		esac
+		exit $EXIT_CODE
+		;;
+	reload)
+		reload
+		;;
+	restart)
+		stop
+		start
+		;;
+	rebuild)
+		rebuild
+		;;
+	condrestart) ;;
+
+	propagate)
+		propagate_ssh_key
+		;;
+	showmem)
+		show_reserved_mem
+		;;
+	estimate)
+		do_estimate
+		;;
+	get-default-crashkernel)
+		get_default_crashkernel "$2"
+		;;
+	reset-crashkernel)
+		shift
+		reset_crashkernel "$@"
+		;;
+	_reset-crashkernel-after-update)
+		if [[ $(kdump_get_conf_val auto_reset_crashkernel) != no ]]; then
+			reset_crashkernel_after_update
+		fi
+		;;
+	_reset-crashkernel-for-installed_kernel)
+		if [[ $(kdump_get_conf_val auto_reset_crashkernel) != no ]]; then
+			reset_crashkernel_for_installed_kernel "$2"
+		fi
+		;;
+	*)
+		dinfo $"Usage: $0 {estimate|start|stop|status|restart|reload|rebuild|reset-crashkernel|propagate|showmem}"
+		exit 1
+		;;
+	esac
+}
+
+# Other kdumpctl instances will block in queue, until this one exits
+single_instance_lock
+
+# To avoid fd 9 leaking, we invoke a subshell, close fd 9 and call main.
+# So that fd isn't leaking when main is invoking a subshell.
+(
+	exec 9<&-
+	main "$@"
+)
+
+exit $?

@@ -1,0 +1,68 @@
+From 63e9a012112e418876413bf45440118d69d85189 Mon Sep 17 00:00:00 2001
+From: Gautam Menghani <gautam@linux.vnet.ibm.com>
+Date: Wed, 1 Mar 2023 03:58:19 -0500
+Subject: [PATCH 4/6] ppc64: Add elf-ppc64 file types/options and an arch
+ specific flag to man page
+
+Document the elf-ppc64 file options and the "--dt-no-old-root" arch
+specific flag in the man page.
+
+Signed-off-by: Gautam Menghani <gautam@linux.vnet.ibm.com>
+Signed-off-by: Simon Horman <horms@kernel.org>
+---
+ kexec/kexec.8 | 35 +++++++++++++++++++++++++++++++++++
+ 1 file changed, 35 insertions(+)
+
+diff --git a/kexec/kexec.8 b/kexec/kexec.8
+index 66453b8..3a344c5 100644
+--- a/kexec/kexec.8
++++ b/kexec/kexec.8
+@@ -335,6 +335,37 @@ with command-line arguments
+ .I "arg1 arg2 ..."
+ This parameter can be specified multiple times.
+ .RE
++.PP
++.B elf-ppc64
++.RS
++.TP
++.BI \-\-reuse-cmdline
++Use the kernel command line from the running system.
++.TP
++.BI \-\-command\-line= string
++Set the kernel command line to
++.IR string.
++.TP
++.BI \-\-append= string
++Set the kernel command line to
++.IR string.
++.TP
++.BI \-\-ramdisk= file
++Use
++.IR file
++as the initial RAM disk.
++.TP
++.BI \-\-initrd= file
++Use
++.IR file
++as the initial RAM disk.
++.TP
++.BI \-\-devicetreeblob= file
++Specify device tree blob file. Not applicable while using --kexec-file-syscall.
++.TP
++.BI \-\-dtb= file
++Specify device tree blob file. Not applicable while using --kexec-file-syscall.
++.RE
+ 
+ .SH ARCHITECTURE OPTIONS
+ .TP
+@@ -362,3 +393,7 @@ for debug output.
+ Specify the
+ .I baud rate
+ of the serial port.
++.TP
++.BI \-\-dt\-no\-old\-root
++Do not reuse old kernel root=<device>
++param while creating flatten device tree.
+-- 
+2.33.1
+

@@ -1,0 +1,108 @@
+From 29fe5067ed07452bcbbbe5fcd0b4e4215f598014 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Ahelenia=20Ziemia=C5=84ska?=
+ <nabijaczleweli@nabijaczleweli.xyz>
+Date: Fri, 3 Feb 2023 00:10:18 +0100
+Subject: [PATCH 2/6] kexec: make -a the default
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+AFAICT, there's no downside to this, and running into this each time
+I want to kexec (and, presumably, a significant chunk of the population,
+since lockdown is quite popular) on some machines,
+then going to the manual, then finding out I want the /auto/ flag(!)
+is quite annoying:
+  # kexec -l /boot/vmlinuz-6.1.0-3-amd64 --initrd /boot/initrd.img-6.1.0-3-amd64 --reuse-cmdline
+  kexec_load failed: Operation not permitted
+  entry       = 0x46eff7760 flags = 0x3e0000
+  nr_segments = 7
+  segment[0].buf   = 0x557cd303efa0
+  segment[0].bufsz = 0x70
+  segment[0].mem   = 0x100000
+  segment[0].memsz = 0x1000
+  segment[1].buf   = 0x557cd3046fe0
+  segment[1].bufsz = 0x190
+  segment[1].mem   = 0x101000
+  segment[1].memsz = 0x1000
+  segment[2].buf   = 0x557cd303f6e0
+  segment[2].bufsz = 0x30
+  segment[2].mem   = 0x102000
+  segment[2].memsz = 0x1000
+  segment[3].buf   = 0x7f658fa37010
+  segment[3].bufsz = 0x12a51b5
+  segment[3].mem   = 0x46a55a000
+  segment[3].memsz = 0x12a6000
+  segment[4].buf   = 0x7f6590ce1210
+  segment[4].bufsz = 0x7e99e0
+  segment[4].mem   = 0x46b800000
+  segment[4].memsz = 0x377c000
+  segment[5].buf   = 0x557cd3039350
+  segment[5].bufsz = 0x42fa
+  segment[5].mem   = 0x46eff2000
+  segment[5].memsz = 0x5000
+  segment[6].buf   = 0x557cd3032000
+  segment[6].bufsz = 0x70e0
+  segment[6].mem   = 0x46eff7000
+  segment[6].memsz = 0x9000
+
+Closes: https://bugs.debian.org/1030248
+Signed-off-by: Ahelenia Ziemiańska <nabijaczleweli@nabijaczleweli.xyz>
+Signed-off-by: Simon Horman <horms@kernel.org>
+---
+ kexec/kexec.8 | 4 ++--
+ kexec/kexec.c | 8 ++++----
+ 2 files changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/kexec/kexec.8 b/kexec/kexec.8
+index 3ebede6..66453b8 100644
+--- a/kexec/kexec.8
++++ b/kexec/kexec.8
+@@ -151,14 +151,14 @@ Specify that the new kernel is of this
+ Specify that the new KEXEC_FILE_LOAD syscall should be used exclusively.
+ .TP
+ .BI \-c\ (\-\-kexec-syscall)
+-Specify that the old KEXEC_LOAD syscall should be used exclusively (the default).
++Specify that the old KEXEC_LOAD syscall should be used exclusively.
+ .TP
+ .BI \-a\ (\-\-kexec-syscall-auto)
+ Try the new KEXEC_FILE_LOAD syscall first and when it is not supported or the
+ kernel does not understand the supplied image fall back to the old KEXEC_LOAD
+ interface.
+ 
+-There is no one single interface that always works.
++There is no one single interface that always works, so this is the default.
+ 
+ KEXEC_FILE_LOAD is required on systems that use locked-down secure boot to
+ verify the kernel signature.  KEXEC_LOAD may be also disabled in the kernel
+diff --git a/kexec/kexec.c b/kexec/kexec.c
+index 0e92d96..36bb2ad 100644
+--- a/kexec/kexec.c
++++ b/kexec/kexec.c
+@@ -1049,11 +1049,11 @@ void usage(void)
+ 	       "                      to original kernel.\n"
+ 	       " -s, --kexec-file-syscall Use file based syscall for kexec operation\n"
+ 	       " -c, --kexec-syscall  Use the kexec_load syscall for for compatibility\n"
+-	       "                      with systems that don't support -s (default)\n"
++	       "                      with systems that don't support -s\n"
+ 	       " -a, --kexec-syscall-auto  Use file based syscall for kexec and fall\n"
+ 	       "                      back to the compatibility syscall when file based\n"
+ 	       "                      syscall is not supported or the kernel did not\n"
+-	       "                      understand the image\n"
++	       "                      understand the image (default)\n"
+ 	       " -d, --debug          Enable debugging to help spot a failure.\n"
+ 	       " -S, --status         Return 1 if the type (by default crash) is loaded,\n"
+ 	       "                      0 if not.\n"
+@@ -1407,8 +1407,8 @@ int main(int argc, char *argv[])
+ 	int do_ifdown = 0, skip_ifdown = 0;
+ 	int do_unload = 0;
+ 	int do_reuse_initrd = 0;
+-	int do_kexec_file_syscall = 0;
+-	int do_kexec_fallback = 0;
++	int do_kexec_file_syscall = 1;
++	int do_kexec_fallback = 1;
+ 	int skip_checks = 0;
+ 	int do_status = 0;
+ 	void *entry = 0;
+-- 
+2.33.1
+
