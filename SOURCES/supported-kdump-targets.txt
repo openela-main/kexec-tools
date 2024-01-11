@@ -35,7 +35,8 @@ updating lists accordingly.
 Supported Dump targets
 ----------------------
 storage:
-        LVM volume (no thinp)
+        LVM volume
+        Thin provisioning volume
         FC disks (qla2xxx, lpfc, bnx2fc, bfa)
         software initiator based iSCSI
         software RAID (mdraid)
@@ -82,7 +83,6 @@ Unsupported Dump targets
 ------------------------
 storage:
         BIOS RAID
-        Thin provisioning volume
         Software iSCSI with iBFT (bnx2i, cxgb3i, cxgb4i)
         Software iSCSI with hybrid (be2iscsi)
         FCoE

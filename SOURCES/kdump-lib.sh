@@ -7,6 +7,17 @@
 
 FADUMP_ENABLED_SYS_NODE="/sys/kernel/fadump_enabled"
 
+is_uki()
+{
+	local img
+
+	img="$1"
+
+	[[ -f "$img" ]] || return
+	[[ "$(file -b --mime-type "$img")" == application/x-dosexec ]] || return
+	objdump -h -j .linux "$img" &> /dev/null
+}
+
 is_fadump_capable()
 {
 	# Check if firmware-assisted dump is enabled
@@ -20,12 +31,11 @@ is_fadump_capable()
 
 is_squash_available()
 {
+	local _version kmodule
+
+	_version=$(_get_kdump_kernel_version)
 	for kmodule in squashfs overlay loop; do
-		if [[ -z $KDUMP_KERNELVER ]]; then
-			modprobe --dry-run $kmodule &> /dev/null || return 1
-		else
-			modprobe -S "$KDUMP_KERNELVER" --dry-run $kmodule &> /dev/null || return 1
-		fi
+		modprobe -S "$_version" --dry-run $kmodule &> /dev/null || return 1
 	done
 }
 
@@ -506,24 +516,6 @@ check_current_kdump_status()
 	fi
 }
 
-# remove_cmdline_param <kernel cmdline> <param1> [<param2>] ... [<paramN>]
-# Remove a list of kernel parameters from a given kernel cmdline and print the result.
-# For each "arg" in the removing params list, "arg" and "arg=xxx" will be removed if exists.
-remove_cmdline_param()
-{
-	local cmdline=$1
-	shift
-
-	for arg in "$@"; do
-		cmdline=$(echo "$cmdline" |
-			sed -e "s/\b$arg=[^ ]*//g" \
-				-e "s/^$arg\b//g" \
-				-e "s/[[:space:]]$arg\b//g" \
-				-e "s/\s\+/ /g")
-	done
-	echo "$cmdline"
-}
-
 #
 # This function returns the "apicid" of the boot
 # cpu (cpu 0) if present.
@@ -536,23 +528,6 @@ get_bootcpu_apicid()
         CPU=="0" && /^apicid/           { print $NF; }          \
         ' \
 		/proc/cpuinfo
-}
-
-#
-# append_cmdline <kernel cmdline> <parameter name> <parameter value>
-# This function appends argument "$2=$3" to string ($1) if not already present.
-#
-append_cmdline()
-{
-	local cmdline=$1
-	local newstr=${cmdline/$2/""}
-
-	# unchanged str implies argument wasn't there
-	if [[ $cmdline == "$newstr" ]]; then
-		cmdline="${cmdline} ${2}=${3}"
-	fi
-
-	echo "$cmdline"
 }
 
 # This function check iomem and determines if we have more than
@@ -647,7 +622,9 @@ prepare_kdump_kernel()
 	read -r machine_id < /etc/machine-id
 
 	boot_dirlist=${KDUMP_BOOTDIR:-"/boot /boot/efi /efi /"}
-	boot_imglist="$KDUMP_IMG-$kdump_kernelver$KDUMP_IMG_EXT $machine_id/$kdump_kernelver/$KDUMP_IMG"
+	boot_imglist="$KDUMP_IMG-$kdump_kernelver$KDUMP_IMG_EXT \
+		$machine_id/$kdump_kernelver/$KDUMP_IMG \
+		EFI/Linux/$machine_id-$kdump_kernelver.efi"
 
 	# The kernel of OSTree based systems is not in the standard locations.
 	if is_ostree; then
@@ -671,6 +648,75 @@ prepare_kdump_kernel()
 	echo "$kdump_kernel"
 }
 
+_is_valid_kver()
+{
+	[[ -f /usr/lib/modules/$1/modules.dep ]]
+}
+
+# This function is introduced since 64k variant may be installed on 4k or vice versa
+# $1 the kernel path name.
+parse_kver_from_path()
+{
+	local _img _kver
+
+	[[ -z "$1" ]] && return
+
+	_img=$1
+	BLS_ENTRY_TOKEN=$(</etc/machine-id)
+
+	# Fedora standard installation, i.e. $BOOT/vmlinuz-<version>
+	_kver=${_img##*/vmlinuz-}
+	_kver=${_kver%"$KDUMP_IMG_EXT"}
+	if _is_valid_kver "$_kver"; then
+		echo "$_kver"
+		return
+	fi
+
+	# BLS recommended image names, i.e. $BOOT/<token>/<version>/linux
+	_kver=${_img##*/"$BLS_ENTRY_TOKEN"/}
+	_kver=${_kver%%/*}
+	if _is_valid_kver "$_kver"; then
+		echo "$_kver"
+		return
+	fi
+
+	# Fedora UKI installation, i.e. $BOOT/efi/EFI/Linux/<token>-<version>.efi
+	_kver=${_img##*/"$BLS_ENTRY_TOKEN"-}
+	_kver=${_kver%.efi}
+	if _is_valid_kver "$_kver"; then
+		echo "$_kver"
+		return
+	fi
+
+	ddebug "Could not parse version from $_img"
+}
+
+_get_kdump_kernel_version()
+{
+	local _version _version_nondebug
+
+	if [[ -n "$KDUMP_KERNELVER" ]]; then
+		echo "$KDUMP_KERNELVER"
+		return
+	fi
+
+	_version=$(uname -r)
+	if [[ ! "$_version" =~ [+|-]debug$ ]]; then
+		echo "$_version"
+		return
+	fi
+
+	_version_nondebug=${_version%+debug}
+	_version_nondebug=${_version_nondebug%-debug}
+	if [[ -f "$(prepare_kdump_kernel "$_version_nondebug")" ]]; then
+		dinfo "Use of debug kernel detected. Trying to use $_version_nondebug"
+		echo "$_version_nondebug"
+	else
+		dinfo "Use of debug kernel detected but cannot find $_version_nondebug. Falling back to $_version"
+		echo "$_version"
+	fi
+}
+
 #
 # Detect initrd and kernel location, results are stored in global environmental variables:
 # KDUMP_BOOTDIR, KDUMP_KERNELVER, KDUMP_KERNEL, DEFAULT_INITRD, and KDUMP_INITRD
@@ -680,48 +726,27 @@ prepare_kdump_kernel()
 #
 prepare_kdump_bootinfo()
 {
-	local boot_initrdlist nondebug_kernelver debug_kernelver
-	local default_initrd_base var_target_initrd_dir
+	local boot_initrdlist default_initrd_base var_target_initrd_dir
 
-	if [[ -z $KDUMP_KERNELVER ]]; then
-		KDUMP_KERNELVER=$(uname -r)
-
-		# Fadump uses the regular bootloader, unlike kdump. So, use the same version
-		# for default kernel and capture kernel unless specified explicitly with
-		# KDUMP_KERNELVER option.
-		if ! is_fadump_capable; then
-			nondebug_kernelver=$(sed -n -e 's/\(.*\)+debug$/\1/p' <<< "$KDUMP_KERNELVER")
-		fi
-	fi
-
-	# Use nondebug kernel if possible, because debug kernel will consume more memory and may oom.
-	if [[ -n $nondebug_kernelver ]]; then
-		dinfo "Trying to use $nondebug_kernelver."
-		debug_kernelver=$KDUMP_KERNELVER
-		KDUMP_KERNELVER=$nondebug_kernelver
-	fi
-
+	KDUMP_KERNELVER=$(_get_kdump_kernel_version)
 	KDUMP_KERNEL=$(prepare_kdump_kernel "$KDUMP_KERNELVER")
-
-	if ! [[ -e $KDUMP_KERNEL ]]; then
-		if [[ -n $debug_kernelver ]]; then
-			dinfo "Fallback to using debug kernel"
-			KDUMP_KERNELVER=$debug_kernelver
-			KDUMP_KERNEL=$(prepare_kdump_kernel "$KDUMP_KERNELVER")
-		fi
-	fi
 
 	if ! [[ -e $KDUMP_KERNEL ]]; then
 		derror "Failed to detect kdump kernel location"
 		return 1
 	fi
 
-	if [[ "$KDUMP_KERNEL" == *"+debug" ]]; then
+	# For 64k variant, e.g. vmlinuz-5.14.0-327.el9.aarch64+64k-debug
+	if [[ "$KDUMP_KERNEL" == *"+debug" || "$KDUMP_KERNEL" == *"64k-debug" ]]; then
 		dwarn "Using debug kernel, you may need to set a larger crashkernel than the default value."
 	fi
 
 	# Set KDUMP_BOOTDIR to where kernel image is stored
-	KDUMP_BOOTDIR=$(dirname "$KDUMP_KERNEL")
+	if is_uki "$KDUMP_KERNEL"; then
+		KDUMP_BOOTDIR=/boot
+	else
+		KDUMP_BOOTDIR=$(dirname "$KDUMP_KERNEL")
+	fi
 
 	# Default initrd should just stay aside of kernel image, try to find it in KDUMP_BOOTDIR
 	boot_initrdlist="initramfs-$KDUMP_KERNELVER.img initrd"
@@ -773,26 +798,46 @@ get_watchdog_drvs()
 	echo "$_wdtdrvs"
 }
 
+_cmdline_parse()
+{
+	local opt val
+
+	while read -r opt; do
+		if [[ $opt =~ = ]]; then
+			val=${opt#*=}
+			opt=${opt%%=*}
+			# ignore options like 'foo='
+			[[ -z $val ]] && continue
+			# xargs removes quotes, add them again
+			[[ $val =~ [[:space:]] ]] && val="\"$val\""
+		else
+			val=""
+		fi
+
+		echo "$opt $val"
+	done <<< "$(echo "$1" | xargs -n 1 echo)"
+}
+
 #
 # prepare_cmdline <commandline> <commandline remove> <commandline append>
 # This function performs a series of edits on the command line.
 # Store the final result in global $KDUMP_COMMANDLINE.
 prepare_cmdline()
 {
-	local cmdline id arg
+	local in out append opt val id drv
+	local -A remove
 
-	if [[ -z $1 ]]; then
-		cmdline=$(< /proc/cmdline)
-	else
-		cmdline="$1"
-	fi
+	in=${1:-$(< /proc/cmdline)}
+	while read -r opt val; do
+		[[ -n "$opt" ]] || continue
+		remove[$opt]=1
+	done <<< "$(_cmdline_parse "$2")"
+	append=$3
+
 
 	# These params should always be removed
-	cmdline=$(remove_cmdline_param "$cmdline" crashkernel panic_on_warn)
-	# These params can be removed configurably
-	while read -r arg; do
-		cmdline=$(remove_cmdline_param "$cmdline" "$arg")
-	done <<< "$(echo "$2" | xargs -n 1 echo)"
+	remove[crashkernel]=1
+	remove[panic_on_warn]=1
 
 	# Always remove "root=X", as we now explicitly generate all kinds
 	# of dump target mount information including root fs.
@@ -800,39 +845,63 @@ prepare_cmdline()
 	# We do this before KDUMP_COMMANDLINE_APPEND, if one really cares
 	# about it(e.g. for debug purpose), then can pass "root=X" using
 	# KDUMP_COMMANDLINE_APPEND.
-	cmdline=$(remove_cmdline_param "$cmdline" root)
+	remove[root]=1
 
 	# With the help of "--hostonly-cmdline", we can avoid some interitage.
-	cmdline=$(remove_cmdline_param "$cmdline" rd.lvm.lv rd.luks.uuid rd.dm.uuid rd.md.uuid fcoe)
+	remove[rd.lvm.lv]=1
+	remove[rd.luks.uuid]=1
+	remove[rd.dm.uuid]=1
+	remove[rd.md.uuid]=1
+	remove[fcoe]=1
 
 	# Remove netroot, rd.iscsi.initiator and iscsi_initiator since
 	# we get duplicate entries for the same in case iscsi code adds
 	# it as well.
-	cmdline=$(remove_cmdline_param "$cmdline" netroot rd.iscsi.initiator iscsi_initiator)
+	remove[netroot]=1
+	remove[rd.iscsi.initiator]=1
+	remove[iscsi_initiator]=1
 
-	cmdline="${cmdline} $3"
+	while read -r opt val; do
+		[[ -n "$opt" ]] || continue
+		[[ -n "${remove[$opt]}" ]] && continue
+
+		if [[ -n "$val" ]]; then
+			out+="$opt=$val "
+		else
+			out+="$opt "
+		fi
+	done <<< "$(_cmdline_parse "$in")"
+
+	out+="$append "
 
 	id=$(get_bootcpu_apicid)
-	if [[ -n ${id} ]]; then
-		cmdline=$(append_cmdline "$cmdline" disable_cpu_apicid "$id")
+	if [[ -n "${id}" ]]; then
+		out+="disable_cpu_apicid=$id "
 	fi
 
 	# If any watchdog is used, set it's pretimeout to 0. pretimeout let
 	# watchdog panic the kernel first, and reset the system after the
 	# panic. If the system is already in kdump, panic is not helpful
 	# and only increase the chance of watchdog failure.
-	for i in $(get_watchdog_drvs); do
-		cmdline+=" $i.pretimeout=0"
+	for drv in $(get_watchdog_drvs); do
+		out+="$drv.pretimeout=0 "
 
-		if [[ $i == hpwdt ]]; then
-			# hpwdt have a special parameter kdumptimeout, is's only suppose
-			# to be set to non-zero in first kernel. In kdump, non-zero
-			# value could prevent the watchdog from resetting the system.
-			cmdline+=" $i.kdumptimeout=0"
+		if [[ $drv == hpwdt ]]; then
+			# hpwdt have a special parameter kdumptimeout, it is
+			# only supposed to be set to non-zero in first kernel.
+			# In kdump, non-zero value could prevent the watchdog
+			# from resetting the system.
+			out+="$drv.kdumptimeout=0 "
 		fi
 	done
 
-	echo "$cmdline"
+	# Always disable gpt-auto-generator as it hangs during boot of the
+	# crash kernel. Furthermore we know which disk will be used for dumping
+	# (if at all) and add it explicitly.
+	is_uki "$KDUMP_KERNEL" && out+="rd.systemd.gpt_auto=no "
+
+	# Trim unnecessary whitespaces
+	echo "$out" | sed -e "s/^ *//g" -e "s/ *$//g" -e "s/ \+/ /g"
 }
 
 PROC_IOMEM=/proc/iomem
@@ -879,8 +948,77 @@ get_recommend_size()
 	echo "0M"
 }
 
+has_mlx5()
+{
+	[[ -d /sys/bus/pci/drivers/mlx5_core ]]
+}
+
+has_aarch64_smmu()
+{
+	ls /sys/devices/platform/arm-smmu-* 1> /dev/null 2>&1
+}
+
+# $1 crashkernel=""
+# $2 delta in unit of MB
+_crashkernel_add()
+{
+	local _ck _add _entry _ret
+	local _range _size _offset
+
+	_ck="$1"
+	_add="$2"
+	_ret=""
+
+	if [[ "$_ck" == *@* ]]; then
+		_offset="@${_ck##*@}"
+		_ck=${_ck%@*}
+	elif [[ "$_ck" == *,high ]] || [[ "$_ck" == *,low ]]; then
+		_offset=",${_ck##*,}"
+		_ck=${_ck%,*}
+	else
+		_offset=''
+	fi
+
+	while read -d , -r _entry; do
+		[[ -n "$_entry" ]] || continue
+		if [[ "$_entry" == *:* ]]; then
+			_range=${_entry%:*}
+			_size=${_entry#*:}
+		else
+			_range=""
+			_size=${_entry}
+		fi
+
+		case "${_size: -1}" in
+			K)
+				_size=${_size::-1}
+				_size="$((_size + (_add * 1024)))K"
+				;;
+			M)
+				_size=${_size::-1}
+				_size="$((_size + _add))M"
+				;;
+			G)
+				_size=${_size::-1}
+				_size="$((_size * 1024 + _add))M"
+				;;
+			*)
+				_size="$((_size + (_add * 1024 * 1024)))"
+				;;
+		esac
+
+		[[ -n "$_range" ]] && _ret+="$_range:"
+		_ret+="$_size,"
+	done <<< "$_ck,"
+
+	_ret=${_ret%,}
+	[[ -n "$_offset" ]] && _ret+=$_offset
+	echo "$_ret"
+}
+
 # get default crashkernel
 # $1 dump mode, if not specified, dump_mode will be judged by is_fadump_capable
+# $2 kernel-release, if not specified, got by _get_kdump_kernel_version
 kdump_get_arch_recommend_crashkernel()
 {
 	local _arch _ck_cmdline _dump_mode
@@ -900,8 +1038,32 @@ kdump_get_arch_recommend_crashkernel()
 	if [[ $_arch == "x86_64" ]] || [[ $_arch == "s390x" ]]; then
 		_ck_cmdline="1G-4G:192M,4G-64G:256M,64G-:512M"
 	elif [[ $_arch == "aarch64" ]]; then
-		# For 4KB page size, the formula is based on x86 plus extra = 64M
+		local _running_kernel
+		local _delta=0
+
+		# Base line for 4K variant kernel. The formula is based on x86 plus extra = 64M
 		_ck_cmdline="1G-4G:256M,4G-64G:320M,64G-:576M"
+		if [[ -z "$2" ]]; then
+			_running_kernel=$(_get_kdump_kernel_version)
+		else
+			_running_kernel=$2
+		fi
+
+		# the naming convention of 64k variant suffixes with +64k, e.g. "vmlinuz-5.14.0-312.el9.aarch64+64k"
+		if echo "$_running_kernel" | grep -q 64k; then
+			# Without smmu, the diff of MemFree between 4K and 64K measured on a high end aarch64 machine is 82M.
+			# Picking up 100M to cover this diff. And finally, we have "1G-4G:356M;4G-64G:420M;64G-:676M"
+			((_delta += 100))
+			# On a 64K system, the extra 384MB is calculated by: cmdq_num * 16 bytes + evtq_num * 32B + priq_num * 16B
+			# While on a 4K system, it is negligible
+			has_aarch64_smmu && ((_delta += 384))
+			#64k kernel, mlx5 consumes extra 188M memory, and choose 200M
+			has_mlx5 && ((_delta += 200))
+		else
+			#4k kernel, mlx5 consumes extra 124M memory, and choose 150M
+			has_mlx5 && ((_delta += 150))
+		fi
+		_ck_cmdline=$(_crashkernel_add "$_ck_cmdline" "$_delta")
 	elif [[ $_arch == "ppc64le" ]]; then
 		if [[ $_dump_mode == "fadump" ]]; then
 			_ck_cmdline="4G-16G:768M,16G-64G:1G,64G-128G:2G,128G-1T:4G,1T-2T:6G,2T-4T:12G,4T-8T:20G,8T-16T:36G,16T-32T:64G,32T-64T:128G,64T-:180G"
@@ -968,76 +1130,4 @@ get_all_kdump_crypt_dev()
 	for _dev in $(get_block_dump_target); do
 		get_luks_crypt_dev "$(kdump_get_maj_min "$_dev")"
 	done
-}
-
-check_vmlinux()
-{
-	# Use readelf to check if it's a valid ELF
-	readelf -h "$1" &> /dev/null || return 1
-}
-
-get_vmlinux_size()
-{
-	local size=0 _msize
-
-	while read -r _msize; do
-		size=$((size + _msize))
-	done <<< "$(readelf -l -W "$1" | awk '/^  LOAD/{print $6}' 2> /dev/stderr)"
-
-	echo $size
-}
-
-try_decompress()
-{
-	# The obscure use of the "tr" filter is to work around older versions of
-	# "grep" that report the byte offset of the line instead of the pattern.
-
-	# Try to find the header ($1) and decompress from here
-	for pos in $(tr "$1\n$2" "\n$2=" < "$4" | grep -abo "^$2"); do
-		if ! type -P "$3" > /dev/null; then
-			ddebug "Signiature detected but '$3' is missing, skip this decompressor"
-			break
-		fi
-
-		pos=${pos%%:*}
-		tail "-c+$pos" "$img" | $3 > "$5" 2> /dev/null
-		if check_vmlinux "$5"; then
-			ddebug "Kernel is extracted with '$3'"
-			return 0
-		fi
-	done
-
-	return 1
-}
-
-# Borrowed from linux/scripts/extract-vmlinux
-get_kernel_size()
-{
-	# Prepare temp files:
-	local tmp img=$1
-
-	tmp=$(mktemp /tmp/vmlinux-XXX)
-	trap 'rm -f "$tmp"' 0
-
-	# Try to check if it's a vmlinux already
-	check_vmlinux "$img" && get_vmlinux_size "$img" && return 0
-
-	# That didn't work, so retry after decompression.
-	try_decompress '\037\213\010' xy gunzip "$img" "$tmp" ||
-		try_decompress '\3757zXZ\000' abcde unxz "$img" "$tmp" ||
-		try_decompress 'BZh' xy bunzip2 "$img" "$tmp" ||
-		try_decompress '\135\0\0\0' xxx unlzma "$img" "$tmp" ||
-		try_decompress '\211\114\132' xy 'lzop -d' "$img" "$tmp" ||
-		try_decompress '\002!L\030' xxx 'lz4 -d' "$img" "$tmp" ||
-		try_decompress '(\265/\375' xxx unzstd "$img" "$tmp"
-
-	# Finally check for uncompressed images or objects:
-	[[ $? -eq 0 ]] && get_vmlinux_size "$tmp" && return 0
-
-	# Fallback to use iomem
-	local _size=0 _seg
-	while read -r _seg; do
-		_size=$((_size + 0x${_seg#*-} - 0x${_seg%-*}))
-	done <<< "$(grep -E "Kernel (code|rodata|data|bss)" /proc/iomem | cut -d ":" -f 1)"
-	echo $_size
 }

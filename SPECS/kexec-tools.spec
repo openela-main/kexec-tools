@@ -1,11 +1,11 @@
 %global eppic_ver e8844d3793471163ae4a56d8f95897be9e5bd554
 %global eppic_shortver %(c=%{eppic_ver}; echo ${c:0:7})
-%global mkdf_ver 1.7.2
+%global mkdf_ver 1.7.3
 %global mkdf_shortver %(c=%{mkdf_ver}; echo ${c:0:7})
 
 Name: kexec-tools
-Version: 2.0.25
-Release: 13%{?dist}.1
+Version: 2.0.26
+Release: 8%{?dist}
 License: GPLv2
 Summary: The kexec/kdump userspace component
 
@@ -72,6 +72,7 @@ Requires: dracut >= 050
 Requires: dracut-network >= 050
 Requires: dracut-squash >= 050
 Requires: ethtool
+Requires: binutils
 Recommends: grubby
 Recommends: hostname
 BuildRequires: make
@@ -100,7 +101,6 @@ Requires:       systemd-udev%{?_isa}
 #
 # Patches 301 through 400 are meant for ppc64 kexec-tools enablement
 #
-Patch301: kexec-tools-2.0.25-ppc64-ppc64-remove-rma_top-limit.patch
 
 #
 # Patches 401 through 500 are meant for s390 kexec-tools enablement
@@ -113,7 +113,10 @@ Patch301: kexec-tools-2.0.25-ppc64-ppc64-remove-rma_top-limit.patch
 #
 # Patches 601 onward are generic patches
 #
-Patch601: kexec-tools-2.0.23-makedumpfile-1.7.2-sadump-fix-failure-of-reading-memory-when-5-le.patch
+Patch601: kexec-tools-2.0.26-0001-ppc64-add-reuse-cmdline-parameter-support.patch
+Patch602: kexec-tools-2.0.26-0002-kexec-make-a-the-default.patch
+Patch603: kexec-tools-2.0.26-0003-x86-add-devicetree-support.patch
+Patch604: kexec-tools-2.0.26-0004-ppc64-Add-elf-ppc64-file-types-options-and-an-arch-s.patch
 
 %description
 kexec-tools provides /sbin/kexec binary that facilitates a new
@@ -129,8 +132,10 @@ mkdir -p -m755 kcp
 tar -z -x -v -f %{SOURCE9}
 tar -z -x -v -f %{SOURCE19}
 
-%patch301 -p1
 %patch601 -p1
+%patch602 -p1
+%patch603 -p1
+%patch604 -p1
 
 %ifarch ppc
 %define archdef ARCH=ppc
@@ -273,21 +278,6 @@ chmod 755 $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/99zz-fadumpini
 mkdir -p $RPM_BUILD_ROOT/%{dracutlibdir}/modules.d/
 mv $RPM_BUILD_ROOT/etc/kdump-adv-conf/kdump_dracut_modules/* $RPM_BUILD_ROOT/%{dracutlibdir}/modules.d/
 
-%pre
-# Save the old default crashkernel values to /tmp/ when upgrading the package
-# so kdumpctl later can tell if it should update the kernel crashkernel
-# parameter in the posttrans scriptlet.  Note this feauture of auto-updating
-# the kernel crashkernel parameter currently doesn't support ostree, so skip it
-# for ostree.
-if [ ! -f /run/ostree-booted ] && [ $1 == 2 ] && grep -q get-default-crashkernel /usr/bin/kdumpctl; then
-  kdumpctl get-default-crashkernel kdump > /tmp/old_default_crashkernel 2>/dev/null
-%ifarch ppc64 ppc64le
-  kdumpctl get-default-crashkernel fadump > /tmp/old_default_crashkernel_fadump 2>/dev/null
-%endif
-fi
-# don't block package update
-:
-
 %post
 # Initial installation
 %systemd_post kdump.service
@@ -296,7 +286,7 @@ touch /etc/kdump.conf
 
 %ifarch ppc64 ppc64le
 servicelog_notify --remove --command=/usr/lib/kdump/kdump-migrate-action.sh 2>/dev/null
-servicelog_notify --add --command=/usr/lib/kdump/kdump-migrate-action.sh --match='refcode="#MIGRATE" and serviceable=0' --type=EVENT --method=pairs_stdin
+servicelog_notify --add --command=/usr/lib/kdump/kdump-migrate-action.sh --match='refcode="#MIGRATE" and serviceable=0' --type=EVENT --method=pairs_stdin >/dev/null
 %endif
 
 # This portion of the script is temporary.  Its only here
@@ -327,7 +317,7 @@ fi
 
 %preun
 %ifarch ppc64 ppc64le
-servicelog_notify --remove --command=/usr/lib/kdump/kdump-migrate-action.sh
+servicelog_notify --remove --command=/usr/lib/kdump/kdump-migrate-action.sh >/dev/null
 %endif
 %systemd_preun kdump.service
 
@@ -354,21 +344,15 @@ do
 done
 
 %posttrans
-# Try to reset kernel crashkernel value to new default value based on the old
-# default value or set up crasherkernel value for osbuild
+# Try to reset kernel crashkernel value to new default value or set up
+# crasherkernel value for new install
 #
 # Note
 #  1. Skip ostree systems as they are not supported.
-#  2. "[ $1 == 1 ]" in posttrans scriptlet means both install and upgrade. The
-#     former case is used to set up crashkernel for osbuild
-if [ ! -f /run/ostree-booted ] && [ $1 == 1 ]; then
+#  2. For Fedora 36 and RHEL9, "[ $1 == 1 ]" in posttrans scriptlet means both install and upgrade;
+#     For Fedora > 36, "[ $1 == 1 ]" only means install and "[ $1 == 2 ]" means upgrade
+if [ ! -f /run/ostree-booted ] && [ $1 == 1 -o $1 == 2 ]; then
   kdumpctl _reset-crashkernel-after-update
-  rm /tmp/old_default_crashkernel 2>/dev/null
-%ifarch ppc64 ppc64le
-  rm /tmp/old_default_crashkernel_fadump 2>/dev/null
-%endif
-  # dnf would complain about the exit code not being 0. To keep it happy,
-  # always return 0
   :
 fi
 
@@ -430,8 +414,50 @@ fi
 %endif
 
 %changelog
-* Fri May 5 2023 Tao Liu <ltao@redhat.com> - 2.0.25-13.1
-- makedumpfile: sadump: fix failure of reading memory when 5-level
+* Tue Jul 4 2023 Tao Liu <ltao@redhat.com> - 2.0.26-8
+- spec: kdump/ppc64: make servicelog_notify silent when there are no errors
+
+* Wed Jun 21 2023 Tao Liu <ltao@redhat.com> - 2.0.26-7
+- kdumpctl: Fix temporary directory location
+- kdump-lib: Match 64k debug kernel in prepare_kdump_bootinfo()
+
+* Thu Jun 15 2023 Tao Liu <ltao@redhat.com> - 2.0.26-6
+- kdumpctl: Fix the matching of plus symbol by grep's EREs
+- kdump-lib: Evaluate the memory consumption by smmu and mlx5 separately
+- kdump-lib: add support for 64K aarch64
+- kdump-lib: Introduce parse_kver_from_path() to get kernel version from its path name
+- kdump-lib: Introduce a help function _crashkernel_add()
+- Simplify the management of the kernel parameter crashkernel
+- kdump-lib: fix the matching pattern for debug-kernel
+- kdump-lib: always specify version in is_squash_available
+
+* Thu Jun 1 2023 Tao Liu <ltao@redhat.com> - 2.0.26-5
+- Add lvm thin provision to kdump supported-kdump-targets.txt
+- mkdumprd: Use the correct syntax to redirect the stderr to null
+
+* Wed May 31 2023 Tao Liu <ltao@redhat.com> - 2.0.26-4
+- kdumpctl: Add basic UKI support
+- kdumpctl: Move temp file in get_kernel_size to global temp dir
+- kdumpctl: Move get_kernel_size to kdumpctl
+- kdump-lib: fix prepare_cmdline
+- mkdumprd: call dracut with --add-device to install the drivers needed by /boot partition automatically for FIPS
+
+* Tue May 9 2023 Tao Liu <ltao@redhat.com> - 2.0.26-3
+- Rebase makedumpfile to v1.7.3
+- kdumpctl: lower the log level in reset_crashkernel_for_installed_kernel
+
+* Fri Apr 21 2023 Tao Liu <ltao@redhat.com> - 2.0.26-2
+- Rebase makedumpfile to upstream latest(8e8b8814be1)
+- Show how much time kdump has waited for the network to be ready
+- Tell nmcli to not escape colon when getting the path of connection profile
+
+* Fri Apr 7 2023 Tao Liu <ltao@redhat.com> - 2.0.26-1
+- Rebase kexec-tools to v2.0.26
+
+* Tue Mar 21 2023 Tao Liu <ltao@redhat.com> - 2.0.25-14
+- Install nfsv4-related drivers when users specify nfs dumping via dracut_args
+- Revert "ppc64: tackle SRCU hang issue"
+- sysconfig: add zfcp.allow_lun_scan to KDUMP_COMMANDLINE_REMOVE on s390
 
 * Fri Mar 10 2023 Tao Liu <ltao@redhat.com> - 2.0.25-13
 - kdump-lib: Add the CoreOS kernel dir to the boot_dirlist
