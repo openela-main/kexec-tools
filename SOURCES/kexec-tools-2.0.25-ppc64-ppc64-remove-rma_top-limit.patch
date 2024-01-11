@@ -1,0 +1,37 @@
+From 6b6187f546f0ddad8ea84d22c3f7ad72133dcfe3 Mon Sep 17 00:00:00 2001
+From: Sourabh Jain <sourabhjain@linux.ibm.com>
+Date: Thu, 15 Sep 2022 14:12:40 +0530
+Subject: [PATCH] ppc64: remove rma_top limit
+
+Restricting kexec tool to allocate hole for kexec segments below 768MB
+may not be relavent now since first memory block size can be 1024MB and
+more.
+
+Removing rma_top restriction will give more space to find holes for
+kexec segments and existing in-place checks make sure that kexec segment
+allocation doesn't cross the first memory block because every kexec segment
+has to be within first memory block for kdump kernel to boot properly.
+
+Signed-off-by: Sourabh Jain <sourabhjain@linux.ibm.com>
+Acked-by: Hari Bathini <hbathini@linux.ibm.com>
+Signed-off-by: Simon Horman <horms@kernel.org>
+---
+ kexec/arch/ppc64/kexec-ppc64.c | 2 --
+ 1 file changed, 2 deletions(-)
+
+diff --git a/kexec/arch/ppc64/kexec-ppc64.c b/kexec/arch/ppc64/kexec-ppc64.c
+index 5b17740..611809f 100644
+--- a/kexec/arch/ppc64/kexec-ppc64.c
++++ b/kexec/arch/ppc64/kexec-ppc64.c
+@@ -717,8 +717,6 @@ static int get_devtree_details(unsigned long kexec_flags)
+ 			if (base < rma_base) {
+ 				rma_base = base;
+ 				rma_top = base + be64_to_cpu(((uint64_t *)buf)[1]);
+-				if (rma_top > 0x30000000UL)
+-					rma_top = 0x30000000UL;
+ 			}
+ 
+ 			fclose(file);
+-- 
+2.38.1
+
