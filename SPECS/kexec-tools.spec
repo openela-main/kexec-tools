@@ -1,6 +1,6 @@
 Name: kexec-tools
-Version: 2.0.25
-Release: 5%{?dist}.1
+Version: 2.0.26
+Release: 8%{?dist}
 License: GPLv2
 Group: Applications/System
 Summary: The kexec/kdump userspace component
@@ -13,7 +13,7 @@ Source4: kdump.sysconfig.i386
 Source5: kdump.sysconfig.ppc64
 Source7: mkdumprd
 Source8: gen-kdump-conf.sh
-Source9: https://github.com/makedumpfile/makedumpfile/archive/1.7.1.tar.gz
+Source9: https://github.com/makedumpfile/makedumpfile/archive/1.7.2.tar.gz
 Source10: kexec-kdump-howto.txt
 Source12: mkdumprd.8
 Source13: 98-kexec.rules
@@ -111,8 +111,7 @@ Patch602: rhelonly-kexec-tools-2.0.18-eppic-fix-issues-with-hardening-flags.patc
 
 # Patches 701 onward for makedumpfile
 Patch701: rhelonly-kexec-tools-2.0.20-makedumpfile-arm64-Add-support-for-ARMv8.2-LVA-52-bi.patch
-Patch702: kexec-tools-2.0.24-makedumpfile-Avoid_false_positive_mem_section_validation_with_vmlinux.patch
-Patch703: kexec-tools-2.0.25-makedumpfile-sadump-fix-failure-of-reading-memory-when-5-le.patch
+Patch702: kexec-tools-2.0.26-makedumpfile-sadump-fix-failure-of-reading-memory-when-5-le.patch
 
 %description
 kexec-tools provides /usr/sbin/kexec binary that facilitates a new
@@ -133,7 +132,6 @@ tar -z -x -v -f %{SOURCE19}
 
 %patch701 -p1
 %patch702 -p1
-%patch703 -p1
 
 %ifarch ppc
 %define archdef ARCH=ppc
@@ -166,8 +164,8 @@ cp %{SOURCE31} .
 make
 %ifarch %{ix86} x86_64 ppc64 s390x ppc64le aarch64
 make -C eppic/libeppic
-make -C makedumpfile-1.7.1 LINKTYPE=dynamic USELZO=on USESNAPPY=on USEZSTD=on
-make -C makedumpfile-1.7.1 LDFLAGS="$LDFLAGS -I../eppic/libeppic -L../eppic/libeppic" eppic_makedumpfile.so
+make -C makedumpfile-1.7.2 LINKTYPE=dynamic USELZO=on USESNAPPY=on USEZSTD=on
+make -C makedumpfile-1.7.2 LDFLAGS="$LDFLAGS -I../eppic/libeppic -L../eppic/libeppic" eppic_makedumpfile.so
 %endif
 
 %install
@@ -228,13 +226,13 @@ install -m 755 -D %{SOURCE32} $RPM_BUILD_ROOT%{_prefix}/lib/kernel/install.d/60-
 
 
 %ifarch %{ix86} x86_64 ppc64 s390x ppc64le aarch64
-install -m 755 makedumpfile-1.7.1/makedumpfile $RPM_BUILD_ROOT/usr/sbin/makedumpfile
-install -m 644 makedumpfile-1.7.1/makedumpfile.8 $RPM_BUILD_ROOT/%{_mandir}/man8/makedumpfile.8
-install -m 644 makedumpfile-1.7.1/makedumpfile.conf.5 $RPM_BUILD_ROOT/%{_mandir}/man5/makedumpfile.conf.5
-install -m 644 makedumpfile-1.7.1/makedumpfile.conf $RPM_BUILD_ROOT/%{_sysconfdir}/makedumpfile.conf.sample
-install -m 755 makedumpfile-1.7.1/eppic_makedumpfile.so $RPM_BUILD_ROOT/%{_libdir}/eppic_makedumpfile.so
+install -m 755 makedumpfile-1.7.2/makedumpfile $RPM_BUILD_ROOT/usr/sbin/makedumpfile
+install -m 644 makedumpfile-1.7.2/makedumpfile.8 $RPM_BUILD_ROOT/%{_mandir}/man8/makedumpfile.8
+install -m 644 makedumpfile-1.7.2/makedumpfile.conf.5 $RPM_BUILD_ROOT/%{_mandir}/man5/makedumpfile.conf.5
+install -m 644 makedumpfile-1.7.2/makedumpfile.conf $RPM_BUILD_ROOT/%{_sysconfdir}/makedumpfile.conf.sample
+install -m 755 makedumpfile-1.7.2/eppic_makedumpfile.so $RPM_BUILD_ROOT/%{_libdir}/eppic_makedumpfile.so
 mkdir -p $RPM_BUILD_ROOT/usr/share/makedumpfile/eppic_scripts/
-install -m 644 makedumpfile-1.7.1/eppic_scripts/* $RPM_BUILD_ROOT/usr/share/makedumpfile/eppic_scripts/
+install -m 644 makedumpfile-1.7.2/eppic_scripts/* $RPM_BUILD_ROOT/usr/share/makedumpfile/eppic_scripts/
 %endif
 
 %define remove_dracut_prefix() %(echo -n %1|sed 's/.*dracut-//g')
@@ -398,12 +396,39 @@ done
 %endif
 
 %changelog
-* Thu May  4 2023 Pingfan Liu <piliu@redhat.com> - 2.0.25-5.1
+* Thu Aug 10 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-8
+- mkdumprd: Use the correct syntax to redirect the stderr to null
+- mkdumprd: call dracut with --add-device to install the drivers needed by /boot partition automatically for FIPS
+- Add NICs that handle DNS queries to the allowlist
+
+* Wed Jul 12 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-7
+- Revert "Revert "Append both nofail and x-systemd.before to kdump mount target"
+
+* Thu Jun 29 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-6
+- dracut-module-setup.sh: skip installing driver for the loopback interface
+- Reduce kdump memory consumption by only installing needed NIC drivers
+
+* Tue Jun 13 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-5
+- Revert "Append both nofail and x-systemd.before to kdump mount target"
+
+* Wed May 31 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-4
+- Only rename the virtual Azure Hyper-V network interface
+
+* Tue May 16 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-3
+- Don't rename Azure Hyper-V network interface
+
+* Thu Apr 20 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-2
 - sadump: fix failure of reading memory when 5-level paging is enabled
 
+* Tue Apr  4 2023 Pingfan Liu <piliu@redhat.com> - 2.0.25-7
+- Rebase makedumpfile to 1.7.2
+
+* Tue Mar 14 2023 Pingfan Liu <piliu@redhat.com> - 2.0.25-6
+- sysconfig: add zfcp.allow_lun_scan to KDUMP_COMMANDLINE_REMOVE on s390
+
 * Wed Jan 18 2023 Pingfan Liu <piliu@redhat.com> - 2.0.25-5
- dracut-module-setup: Fix invalid rd.znet command line entry
- dracut-module-setup: Fix persistent nic name on s390
+- dracut-module-setup: Fix invalid rd.znet command line entry
+- dracut-module-setup: Fix persistent nic name on s390
 
 * Mon Jan  9 2023 Pingfan Liu <piliu@redhat.com> - 2.0.25-4
 - Don't check fs modified when dump target is lvm2 thinp

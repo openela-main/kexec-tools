@@ -12,10 +12,10 @@ Signed-off-by: Pingfan Liu <piliu@redhat.com>
  makedumpfile.h |  1 +
  3 files changed, 16 insertions(+), 1 deletion(-)
 
-diff --git a/makedumpfile-1.7.1/arch/arm64.c b/makedumpfile-1.7.1/arch/arm64.c
+diff --git a/makedumpfile-1.7.2/arch/arm64.c b/makedumpfile-1.7.2/arch/arm64.c
 index 1072178..95beae6 100644
---- a/makedumpfile-1.7.1/arch/arm64.c
-+++ b/makedumpfile-1.7.1/arch/arm64.c
+--- a/makedumpfile-1.7.2/arch/arm64.c
++++ b/makedumpfile-1.7.2/arch/arm64.c
 @@ -50,6 +50,7 @@ static int va_bits;
  static int vabits_actual;
  static int flipped_va;
@@ -51,10 +51,10 @@ index 1072178..95beae6 100644
  
  	kimage_voffset = NUMBER(kimage_voffset);
  	info->section_size_bits = SECTIONS_SIZE_BITS;
-diff --git a/makedumpfile-1.7.1/makedumpfile.c b/makedumpfile-1.7.1/makedumpfile.c
+diff --git a/makedumpfile-1.7.2/makedumpfile.c b/makedumpfile-1.7.2/makedumpfile.c
 index 3ad4443..018ea4c 100644
---- a/makedumpfile-1.7.1/makedumpfile.c
-+++ b/makedumpfile-1.7.1/makedumpfile.c
+--- a/makedumpfile-1.7.2/makedumpfile.c
++++ b/makedumpfile-1.7.2/makedumpfile.c
 @@ -2417,6 +2417,7 @@ write_vmcoreinfo_data(void)
  
  	WRITE_NUMBER("HUGETLB_PAGE_DTOR", HUGETLB_PAGE_DTOR);
@@ -71,10 +71,10 @@ index 3ad4443..018ea4c 100644
  	READ_NUMBER("VA_BITS", VA_BITS);
  	READ_NUMBER("TCR_EL1_T1SZ", TCR_EL1_T1SZ);
  	READ_NUMBER_UNSIGNED("PHYS_OFFSET", PHYS_OFFSET);
-diff --git a/makedumpfile-1.7.1/makedumpfile.h b/makedumpfile-1.7.1/makedumpfile.h
+diff --git a/makedumpfile-1.7.2/makedumpfile.h b/makedumpfile-1.7.2/makedumpfile.h
 index e59239d..b6236dd 100644
---- a/makedumpfile-1.7.1/makedumpfile.h
-+++ b/makedumpfile-1.7.1/makedumpfile.h
+--- a/makedumpfile-1.7.2/makedumpfile.h
++++ b/makedumpfile-1.7.2/makedumpfile.h
 @@ -2064,6 +2064,7 @@ struct number_table {
  	long	phys_base;
  	long	KERNEL_IMAGE_SIZE;

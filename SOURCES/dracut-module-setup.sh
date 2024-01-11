@@ -108,6 +108,17 @@ source_ifcfg_file() {
     fi
 }
 
+add_dns_netdev() {
+    local _server _route
+
+    _server=$1
+    _route=`/sbin/ip -o route get to $_server 2>&1`
+    [ $? != 0 ] && echo "DNS server $_server unreachable"
+
+    _netdev=$(get_ip_route_field "$_route" "dev")
+    _save_kdump_netifs "$_netdev" "$(kdump_setup_ifname $_netdev)"
+}
+
 # $1: netdev name
 kdump_setup_dns() {
     local _nameserver _dns
@@ -115,8 +126,8 @@ kdump_setup_dns() {
 
     source_ifcfg_file $1
 
-    [ -n "$DNS1" ] && echo "nameserver=$DNS1" > "$_dnsfile"
-    [ -n "$DNS2" ] && echo "nameserver=$DNS2" >> "$_dnsfile"
+    [ -n "$DNS1" ] && echo "nameserver=$DNS1" > "$_dnsfile" && add_dns_netdev "$DNS1"
+    [ -n "$DNS2" ] && echo "nameserver=$DNS2" >> "$_dnsfile" && add_dns_netdev "$DNS2"
 
     while read content;
     do
@@ -128,6 +139,7 @@ kdump_setup_dns() {
 
         if [ ! -f $_dnsfile ] || [ ! $(cat $_dnsfile | grep -q $_dns) ]; then
             echo "nameserver=$_dns" >> "$_dnsfile"
+            add_dns_netdev "$_dns"
         fi
     done < "/etc/resolv.conf"
 }
@@ -347,6 +359,38 @@ EOF
     rm -f "$_netif_allowlist_nm_conf"
 }
 
+_get_nic_driver() {
+    ethtool -i "$1" | sed -n -E "s/driver: (.*)/\1/p"
+}
+
+kdump_install_nic_driver() {
+    local _netif _driver _drivers
+
+    _drivers=()
+
+    for _netif in $1; do
+        [[ $_netif == lo ]] && continue
+        _driver=$(_get_nic_driver "$_netif")
+        if [[ -z $_driver ]]; then
+            derror "Failed to get the driver of $_netif"
+            exit 1
+        fi
+
+        if [[ $_driver == "802.1Q VLAN Support" ]]; then
+            # ethtool somehow doesn't return the driver name for a VLAN NIC
+            _driver=8021q
+        elif [[ $_driver == "team" ]]; then
+            # install the team mode drivers like team_mode_roundrobin.ko as well
+            _driver='=drivers/net/team'
+        fi
+
+        _drivers+=("$_driver")
+    done
+
+    [[ -n ${_drivers[*]} ]] || return
+    instmods "${_drivers[@]}"
+}
+
 kdump_setup_bridge() {
     local _netdev=$1
     local _brif _dev _mac _kdumpdev
@@ -481,6 +525,18 @@ kdump_setup_znet() {
     echo rd.znet=${NETTYPE},${SUBCHANNELS}${_options} rd.znet_ifname=$(kdump_setup_ifname $_netdev):${SUBCHANNELS} > ${initdir}/etc/cmdline.d/30znet.conf
 }
 
+_get_nic_driver() {
+    ethtool -i "$1" | sed -n -E "s/driver: (.*)/\1/p"
+}
+
+_rename_hypver_netdev() {
+    local _udev_rule_dir
+
+    _udev_rule_dir=${initdir}/etc/udev/rules.d
+    mkdir -p "$_udev_rule_dir"
+    printf 'SUBSYSTEM=="net", ACTION=="add", DRIVERS=="hv_netvsc", ATTR{address}=="%s", ATTR{type}=="1", NAME="%s"\n' "$2" "$1" > "${_udev_rule_dir}/80-hv_netvsc-ifname.rules"
+}
+
 # Setup dracut to bringup a given network interface
 kdump_setup_netdev() {
     local _netdev=$1 _srcaddr=$2
@@ -529,8 +585,12 @@ kdump_setup_netdev() {
     elif kdump_is_vlan "$_netdev"; then
         kdump_setup_vlan "$_netdev"
     else
-        _ifname_opts=" ifname=$kdumpnic:$_netmac"
-        echo "$_ifname_opts" >> $_ip_conf
+        if [[ $(_get_nic_driver "$1") != hv_netvsc ]]; then
+            _ifname_opts=" ifname=$kdumpnic:$_netmac"
+            echo "$_ifname_opts" >> $_ip_conf
+        else
+            _rename_hypver_netdev "$kdumpnic" "$_netmac"
+        fi
     fi
     _save_kdump_netifs "$_netdev" "$_kdumpdev"
 
@@ -1053,6 +1113,7 @@ install() {
     _netifs=$(_get_kdump_netifs)
     if [[ -n "$_netifs" ]]; then
         kdump_install_nm_netif_allowlist "$_netifs"
+        kdump_install_nic_driver "$_netifs"
     fi
 
     kdump_install_systemd_conf

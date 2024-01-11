@@ -38,10 +38,10 @@ Signed-off-by: HATAYAMA Daisuke <d.hatayama@fujitsu.com>
  sadump_info.c | 4 ++++
  1 file changed, 4 insertions(+)
 
-diff --git a/makedumpfile-1.7.1/sadump_info.c b/makedumpfile-1.7.1/sadump_info.c
+diff --git a/makedumpfile-1.7.2/sadump_info.c b/makedumpfile-1.7.2/sadump_info.c
 index adfa8dc..2c44068 100644
---- a/makedumpfile-1.7.1/sadump_info.c
-+++ b/makedumpfile-1.7.1/sadump_info.c
+--- a/makedumpfile-1.7.2/sadump_info.c
++++ b/makedumpfile-1.7.2/sadump_info.c
 @@ -1362,6 +1362,7 @@ static int linux_banner_sanity_check(ulong cr3)
  #define PTI_USER_PGTABLE_BIT		(info->page_shift)
  #define PTI_USER_PGTABLE_MASK		(1 << PTI_USER_PGTABLE_BIT)
