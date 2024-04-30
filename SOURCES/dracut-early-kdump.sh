@@ -38,18 +38,13 @@ early_kdump_load()
         return 1
     fi
 
-    if check_current_kdump_status; then
+    if is_kernel_loaded "kdump"; then
         return 1
     fi
 
     prepare_parameters
 
     EARLY_KEXEC_ARGS=$(prepare_kexec_args "${KEXEC_ARGS}")
-
-    if is_secure_boot_enforced; then
-        dinfo "Secure Boot is enabled. Using kexec file based syscall."
-        EARLY_KEXEC_ARGS="$EARLY_KEXEC_ARGS -s"
-    fi
 
     # Here, only output the messages, but do not save these messages
     # to a file because the target disk may not be mounted yet, the

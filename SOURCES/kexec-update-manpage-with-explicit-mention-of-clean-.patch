@@ -1,0 +1,39 @@
+From bd0200c47c45dd420244b39ddabcecdab1fb9a8e Mon Sep 17 00:00:00 2001
+From: Hari Bathini <hbathini@linux.ibm.com>
+Date: Wed, 20 Sep 2023 17:29:27 +0530
+Subject: [PATCH] kexec: update manpage with explicit mention of clean kexec
+
+While the manpage does mention about kexec boot with a clean shutdown,
+it is not explicit about it. Make it explicit.
+
+Signed-off-by: Hari Bathini <hbathini@linux.ibm.com>
+Signed-off-by: Simon Horman <horms@kernel.org>
+---
+ kexec/kexec.8 | 11 +++++++++--
+ 1 file changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/kexec/kexec.8 b/kexec/kexec.8
+index 3a344c5..179dcf2 100644
+--- a/kexec/kexec.8
++++ b/kexec/kexec.8
+@@ -95,8 +95,15 @@ then you would use the following command to load the kernel:
+ .RB "\-\-append=" "root=/dev/hda1" "\ \-\-initrd=" /boot/initrd
+ .RE
+ .PP
+-After this kernel is loaded, it can be booted to at any time using the
+-command:
++After this kernel is loaded, assuming the user-space supports kexec-based
++rebooting, it can be booted to, with a clean shutdown, using the command:
++
++.RS
++.BR reboot
++.RE
++.PP
++Alternatively, it can also be booted to, without calling shutdown(8), with
++the command:
+
+ .RS
+ .BR kexec \ \-e
+--
+2.41.0
+

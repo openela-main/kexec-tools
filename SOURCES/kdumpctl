@@ -17,7 +17,6 @@ DEFAULT_INITRD_BAK=""
 INITRD_CHECKSUM_LOCATION=""
 KDUMP_INITRD=""
 TARGET_INITRD=""
-FADUMP_REGISTER_SYS_NODE="/sys/kernel/fadump_registered"
 #kdump shall be the default dump mode
 DEFAULT_DUMP_MODE="kdump"
 image_time=0
@@ -125,7 +124,6 @@ rebuild_fadump_initrd()
 check_earlykdump_is_enabled()
 {
 	grep -q -w "rd.earlykdump" /proc/cmdline
-	return $?
 }
 
 rebuild_kdump_initrd()
@@ -155,8 +153,6 @@ rebuild_initrd()
 	else
 		rebuild_kdump_initrd
 	fi
-
-	return $?
 }
 
 #$1: the files to be checked with IFS=' '
@@ -536,28 +532,22 @@ check_fs_modified()
 check_system_modified()
 {
 	local ret
+	local CONF_ERROR=2
+	local CONF_MODIFY=1
+	local CONF_NO_MODIFY=0
+	local conf_status=$CONF_NO_MODIFY
 
 	[[ -f $TARGET_INITRD ]] || return 1
 
-	check_files_modified
-	ret=$?
-	if [[ $ret -ne 0 ]]; then
-		return $ret
-	fi
+	for _func in check_files_modified check_fs_modified check_drivers_modified; do
+		$_func
+		ret=$?
+		# return immediately if an error occurred.
+		[[ $ret -eq "$CONF_ERROR" ]] && return "$ret"
+		[[ $ret -eq "$CONF_MODIFY" ]] && { conf_status="$CONF_MODIFY"; }
+	done
 
-	check_fs_modified
-	ret=$?
-	if [[ $ret -ne 0 ]]; then
-		return $ret
-	fi
-
-	check_drivers_modified
-	ret=$?
-	if [[ $ret -ne 0 ]]; then
-		return $ret
-	fi
-
-	return 0
+	return $conf_status
 }
 
 check_rebuild()
@@ -626,7 +616,6 @@ check_rebuild()
 
 	dinfo "Rebuilding $TARGET_INITRD"
 	rebuild_initrd
-	return $?
 }
 
 # On ppc64le LPARs, the keys trusted by firmware do not end up in
@@ -642,19 +631,7 @@ function load_kdump_kernel_key()
                 return
         fi
 
-	KDUMP_KEY_ID=$(keyctl padd asymmetric kernelkey-$RANDOM %:.ima < "/usr/share/doc/kernel-keys/$KDUMP_KERNELVER/kernel-signing-ppc.cer")
-}
-
-# remove a previously loaded key. There's no real security implication
-# to leaving it around, we choose to do this because it makes it easier
-# to be idempotent and so as to reduce the potential for confusion.
-function remove_kdump_kernel_key()
-{
-	if [[ -z $KDUMP_KEY_ID ]]; then
-		return
-	fi
-
-	keyctl unlink "$KDUMP_KEY_ID" %:.ima
+	keyctl padd asymmetric "" %:.ima < "/usr/share/doc/kernel-keys/$KDUMP_KERNELVER/kernel-signing-ppc.cer"
 }
 
 # Load the kdump kernel specified in /etc/sysconfig/kdump
@@ -666,15 +643,6 @@ load_kdump()
 
 	KEXEC_ARGS=$(prepare_kexec_args "${KEXEC_ARGS}")
 	KDUMP_COMMANDLINE=$(prepare_cmdline "${KDUMP_COMMANDLINE}" "${KDUMP_COMMANDLINE_REMOVE}" "${KDUMP_COMMANDLINE_APPEND}")
-
-	# For secureboot enabled machines, use new kexec file based syscall.
-	# Old syscall will always fail as it does not have capability to
-	# to kernel signature verification.
-	if is_secure_boot_enforced; then
-		dinfo "Secure Boot is enabled. Using kexec file based syscall."
-		KEXEC_ARGS="$KEXEC_ARGS -s"
-		load_kdump_kernel_key
-	fi
 
 	if is_uki "$KDUMP_KERNEL"; then
 		uki=$KDUMP_KERNEL
@@ -706,8 +674,6 @@ load_kdump()
 	ret=$?
 	set +x
 	exec 2>&12 12>&-
-
-	remove_kdump_kernel_key
 
 	if [[ $ret == 0 ]]; then
 		dinfo "kexec: loaded kdump kernel"
@@ -847,29 +813,10 @@ show_reserved_mem()
 	local mem
 	local mem_mb
 
-	mem=$(< /sys/kernel/kexec_crash_size)
+	mem=$(get_reserved_mem_size)
 	mem_mb=$((mem / 1024 / 1024))
 
 	dinfo "Reserved ${mem_mb}MB memory for crash kernel"
-}
-
-check_current_fadump_status()
-{
-	# Check if firmware-assisted dump has been registered.
-	rc=$(< $FADUMP_REGISTER_SYS_NODE)
-	[[ $rc -eq 1 ]] && return 0
-	return 1
-}
-
-check_current_status()
-{
-	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
-		check_current_fadump_status
-	else
-		check_current_kdump_status
-	fi
-
-	return $?
 }
 
 save_raw()
@@ -998,13 +945,12 @@ check_dump_feasibility()
 	fi
 
 	check_kdump_feasibility
-	return $?
 }
 
 start_fadump()
 {
-	echo 1 > $FADUMP_REGISTER_SYS_NODE
-	if ! check_current_fadump_status; then
+	echo 1 > "$FADUMP_REGISTER_SYS_NODE"
+	if ! is_kernel_loaded "fadump"; then
 		derror "fadump: failed to register"
 		return 1
 	fi
@@ -1015,13 +961,17 @@ start_fadump()
 
 start_dump()
 {
+	# On secure boot enabled Power systems, load kernel signing key on .ima for signature
+	# verification using kexec file based syscall.
+	if [[ "$(uname -m)" == ppc64le ]] && is_secure_boot_enforced; then
+		load_kdump_kernel_key
+	fi
+
 	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
 		start_fadump
 	else
 		load_kdump
 	fi
-
-	return $?
 }
 
 check_failure_action_config()
@@ -1097,7 +1047,7 @@ start()
 		return 1
 	fi
 
-	if [[ $DEFAULT_DUMP_MODE == "kdump" ]] && check_current_kdump_status; then
+	if [[ $DEFAULT_DUMP_MODE == "kdump" ]] && is_kernel_loaded "kdump"; then
 		dwarn "Kdump already running: [WARNING]"
 		return 0
 	fi
@@ -1124,13 +1074,13 @@ start()
 
 reload()
 {
-	if ! check_current_status; then
+	if ! is_kernel_loaded "$DEFAULT_DUMP_MODE"; then
 		dwarn "Kdump was not running: [WARNING]"
 	fi
 
 	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
 		reload_fadump
-		return $?
+		return
 	else
 		if ! stop_kdump; then
 			derror "Stopping kdump: [FAILED]"
@@ -1155,8 +1105,8 @@ reload()
 
 stop_fadump()
 {
-	echo 0 > $FADUMP_REGISTER_SYS_NODE
-	if check_current_fadump_status; then
+	echo 0 > "$FADUMP_REGISTER_SYS_NODE"
+	if is_kernel_loaded "fadump"; then
 		derror "fadump: failed to unregister"
 		return 1
 	fi
@@ -1185,7 +1135,7 @@ stop_kdump()
 
 reload_fadump()
 {
-	if echo 1 > $FADUMP_REGISTER_SYS_NODE; then
+	if echo 1 > "$FADUMP_REGISTER_SYS_NODE"; then
 		dinfo "fadump: re-registered successfully"
 		return 0
 	else
@@ -1194,7 +1144,7 @@ reload_fadump()
 		# to handle such scenario.
 		if stop_fadump; then
 			start_fadump
-			return $?
+			return
 		fi
 	fi
 
@@ -1233,7 +1183,6 @@ rebuild()
 
 	dinfo "Rebuilding $TARGET_INITRD"
 	rebuild_initrd
-	return $?
 }
 
 check_vmlinux()
@@ -1334,7 +1283,7 @@ do_estimate()
 	# The default pre-reserved crashkernel value
 	baseline_size=$((baseline * size_mb))
 	# Current reserved crashkernel size
-	reserved_size=$(< /sys/kernel/kexec_crash_size)
+	reserved_size=$(get_reserved_mem_size)
 	# A pre-estimated value for userspace usage and kernel
 	# runtime allocation, 64M should good for most cases
 	runtime_size=$((64 * size_mb))
@@ -1840,7 +1789,7 @@ main()
 		;;
 	status)
 		EXIT_CODE=0
-		check_current_status
+		is_kernel_loaded "$DEFAULT_DUMP_MODE"
 		case "$?" in
 		0)
 			dinfo "Kdump is operational"
@@ -1907,5 +1856,3 @@ single_instance_lock
 	exec 9<&-
 	main "$@"
 )
-
-exit $?

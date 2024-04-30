@@ -5,7 +5,8 @@
 
 . /usr/lib/kdump/kdump-lib-initramfs.sh
 
-FADUMP_ENABLED_SYS_NODE="/sys/kernel/fadump_enabled"
+FADUMP_ENABLED_SYS_NODE="/sys/kernel/fadump/enabled"
+FADUMP_REGISTER_SYS_NODE="/sys/kernel/fadump/registered"
 
 is_uki()
 {
@@ -27,6 +28,11 @@ is_fadump_capable()
 		[[ $rc -eq 1 ]] && return 0
 	fi
 	return 1
+}
+
+is_sme_or_sev_active()
+{
+	journalctl -q --dmesg --grep "^Memory Encryption Features active: AMD (SME|SEV)$" >/dev/null 2>&1
 }
 
 is_squash_available()
@@ -478,11 +484,24 @@ is_mount_in_dracut_args()
 	[[ " $(kdump_get_conf_val dracut_args)" =~ .*[[:space:]]--mount[=[:space:]].* ]]
 }
 
+get_reserved_mem_size()
+{
+	local reserved_mem_size=0
+
+	if is_fadump_capable; then
+		reserved_mem_size=$(< /sys/kernel/fadump/mem_reserved)
+	else
+		reserved_mem_size=$(< /sys/kernel/kexec_crash_size)
+	fi
+
+	echo "$reserved_mem_size"
+}
+
 check_crash_mem_reserved()
 {
 	local mem_reserved
 
-	mem_reserved=$(< /sys/kernel/kexec_crash_size)
+	mem_reserved=$(get_reserved_mem_size)
 	if [[ $mem_reserved -eq 0 ]]; then
 		derror "No memory reserved for crash kernel"
 		return 1
@@ -501,19 +520,31 @@ check_kdump_feasibility()
 	return $?
 }
 
-check_current_kdump_status()
+is_kernel_loaded()
 {
-	if [[ ! -f /sys/kernel/kexec_crash_loaded ]]; then
-		derror "Perhaps CONFIG_CRASH_DUMP is not enabled in kernel"
-		return 1
-	fi
+	local _sysfs _mode
 
-	rc=$(< /sys/kernel/kexec_crash_loaded)
-	if [[ $rc == 1 ]]; then
-		return 0
-	else
-		return 1
-	fi
+	_mode=$1
+
+	case "$_mode" in
+	kdump)
+		_sysfs="/sys/kernel/kexec_crash_loaded"
+		;;
+	fadump)
+		_sysfs="$FADUMP_REGISTER_SYS_NODE"
+		;;
+	*)
+		derror "Unknown dump mode '$_mode' provided"
+ 		return 1
+		;;
+	esac
+ 
+	if [[ ! -f $_sysfs ]]; then
+		derror "$_mode is not supported on this kernel"
+ 		return 1
+ 	fi
+
+	[[ $(< $_sysfs) -eq 1 ]]
 }
 
 #
@@ -610,6 +641,15 @@ prepare_kexec_args()
 			fi
 		fi
 	fi
+
+	# For secureboot enabled machines, use new kexec file based syscall.
+	# Old syscall will always fail as it does not have capability to do
+	# kernel signature verification.
+	if is_secure_boot_enforced; then
+		dinfo "Secure Boot is enabled. Using kexec file based syscall."
+		kexec_args="$kexec_args -s"
+	fi
+
 	echo "$kexec_args"
 }
 
@@ -958,62 +998,137 @@ has_aarch64_smmu()
 	ls /sys/devices/platform/arm-smmu-* 1> /dev/null 2>&1
 }
 
-# $1 crashkernel=""
-# $2 delta in unit of MB
-_crashkernel_add()
+is_memsize() { [[ "$1" =~ ^[+-]?[0-9]+[KkMmGgTtPbEe]?$ ]]; }
+
+# range defined for crashkernel parameter
+# i.e. <start>-[<end>]
+is_memrange()
 {
-	local _ck _add _entry _ret
-	local _range _size _offset
+	is_memsize "${1%-*}" || return 1
+	[[ -n ${1#*-} ]] || return 0
+	is_memsize "${1#*-}"
+}
 
-	_ck="$1"
-	_add="$2"
-	_ret=""
+to_bytes()
+{
+	local _s
 
-	if [[ "$_ck" == *@* ]]; then
-		_offset="@${_ck##*@}"
-		_ck=${_ck%@*}
-	elif [[ "$_ck" == *,high ]] || [[ "$_ck" == *,low ]]; then
-		_offset=",${_ck##*,}"
-		_ck=${_ck%,*}
+	_s="$1"
+	is_memsize "$_s" || return 1
+
+	case "${_s: -1}" in
+		K|k)
+			_s=${_s::-1}
+			_s="$((_s * 1024))"
+			;;
+		M|m)
+			_s=${_s::-1}
+			_s="$((_s * 1024 * 1024))"
+			;;
+		G|g)
+			_s=${_s::-1}
+			_s="$((_s * 1024 * 1024 * 1024))"
+			;;
+		T|t)
+			_s=${_s::-1}
+			_s="$((_s * 1024 * 1024 * 1024 * 1024))"
+			;;
+		P|p)
+			_s=${_s::-1}
+			_s="$((_s * 1024 * 1024 * 1024 * 1024 * 1024))"
+			;;
+		E|e)
+			_s=${_s::-1}
+			_s="$((_s * 1024 * 1024 * 1024 * 1024 * 1024 * 1024))"
+			;;
+		*)
+			;;
+	esac
+	echo "$_s"
+}
+
+memsize_add()
+{
+	local -a units=("" "K" "M" "G" "T" "P" "E")
+	local i a b
+
+	a=$(to_bytes "$1") || return 1
+	b=$(to_bytes "$2") || return 1
+	i=0
+
+	(( a += b ))
+	while :; do
+		[[ $(( a / 1024 )) -eq 0 ]] && break
+		[[ $(( a % 1024 )) -ne 0 ]] && break
+		[[ $(( ${#units[@]} - 1 )) -eq $i ]] && break
+
+		(( a /= 1024 ))
+		(( i += 1 ))
+	done
+
+	echo "${a}${units[$i]}"
+}
+
+_crashkernel_parse()
+{
+	local ck entry
+	local range size offset
+
+	ck="$1"
+
+	if [[ "$ck" == *@* ]]; then
+		offset="@${ck##*@}"
+		ck=${ck%@*}
+	elif [[ "$ck" == *,high ]] || [[ "$ck" == *,low ]]; then
+		offset=",${ck##*,}"
+		ck=${ck%,*}
 	else
-		_offset=''
+		offset=''
 	fi
 
-	while read -d , -r _entry; do
-		[[ -n "$_entry" ]] || continue
-		if [[ "$_entry" == *:* ]]; then
-			_range=${_entry%:*}
-			_size=${_entry#*:}
+	while read -d , -r entry; do
+		[[ -n "$entry" ]] || continue
+		if [[ "$entry" == *:* ]]; then
+			range=${entry%:*}
+			size=${entry#*:}
 		else
-			_range=""
-			_size=${_entry}
+			range=""
+			size=${entry}
 		fi
 
-		case "${_size: -1}" in
-			K)
-				_size=${_size::-1}
-				_size="$((_size + (_add * 1024)))K"
-				;;
-			M)
-				_size=${_size::-1}
-				_size="$((_size + _add))M"
-				;;
-			G)
-				_size=${_size::-1}
-				_size="$((_size * 1024 + _add))M"
-				;;
-			*)
-				_size="$((_size + (_add * 1024 * 1024)))"
-				;;
-		esac
+		echo "$size;$range;"
+	done <<< "$ck,"
+	echo ";;$offset"
+}
 
-		[[ -n "$_range" ]] && _ret+="$_range:"
-		_ret+="$_size,"
-	done <<< "$_ck,"
+# $1 crashkernel command line parameter
+# $2 size to be added
+_crashkernel_add()
+{
+	local ck delta ret
+	local range size offset
 
-	_ret=${_ret%,}
-	[[ -n "$_offset" ]] && _ret+=$_offset
-	echo "$_ret"
+	ck="$1"
+	delta="$2"
+	ret=""
+
+	while IFS=';' read -r size range offset; do
+		if [[ -n "$offset" ]]; then
+			ret="${ret%,}$offset"
+			break
+		fi
+
+		[[ -n "$size" ]] || continue
+		if [[ -n "$range" ]]; then
+			is_memrange "$range" || return 1
+			ret+="$range:"
+		fi
+
+		size=$(memsize_add "$size" "$delta") || return 1
+		ret+="$size,"
+	done < <( _crashkernel_parse "$ck")
+
+	echo "${ret%,}"
 }
 
 # get default crashkernel
@@ -1022,6 +1137,7 @@ _crashkernel_add()
 kdump_get_arch_recommend_crashkernel()
 {
 	local _arch _ck_cmdline _dump_mode
+	local _delta=0
 
 	if [[ -z "$1" ]]; then
 		if is_fadump_capable; then
@@ -1037,9 +1153,9 @@ kdump_get_arch_recommend_crashkernel()
 
 	if [[ $_arch == "x86_64" ]] || [[ $_arch == "s390x" ]]; then
 		_ck_cmdline="1G-4G:192M,4G-64G:256M,64G-:512M"
+		is_sme_or_sev_active && ((_delta += 64))
 	elif [[ $_arch == "aarch64" ]]; then
 		local _running_kernel
-		local _delta=0
 
 		# Base line for 4K variant kernel. The formula is based on x86 plus extra = 64M
 		_ck_cmdline="1G-4G:256M,4G-64G:320M,64G-:576M"
@@ -1063,7 +1179,6 @@ kdump_get_arch_recommend_crashkernel()
 			#4k kernel, mlx5 consumes extra 124M memory, and choose 150M
 			has_mlx5 && ((_delta += 150))
 		fi
-		_ck_cmdline=$(_crashkernel_add "$_ck_cmdline" "$_delta")
 	elif [[ $_arch == "ppc64le" ]]; then
 		if [[ $_dump_mode == "fadump" ]]; then
 			_ck_cmdline="4G-16G:768M,16G-64G:1G,64G-128G:2G,128G-1T:4G,1T-2T:6G,2T-4T:12G,4T-8T:20G,8T-16T:36G,16T-32T:64G,32T-64T:128G,64T-:180G"
@@ -1072,7 +1187,7 @@ kdump_get_arch_recommend_crashkernel()
 		fi
 	fi
 
-	echo -n "$_ck_cmdline"
+	echo -n "$(_crashkernel_add "$_ck_cmdline" "${_delta}M")"
 }
 
 # return recommended size based on current system RAM size

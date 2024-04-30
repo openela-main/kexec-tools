@@ -1,4 +1,4 @@
 75d3637d8829009015f9ac0b6b2b93b260f6700f3bf930155080906b696d4720 SOURCES/dracut-kdump-emergency.target
 5bf3fce09fc880a96cbc0cbb3eadcae1892d7fd43350a585f150b1cce176b128 SOURCES/eppic-e8844d3.tar.gz
-7fe36a064101cd5c515e41b2be393dce3ca88adce59d6ee668e0af7c0c4570cd SOURCES/kexec-tools-2.0.26.tar.xz
-f059dbebf5156a9ab97cd3c1f41ad5df3436c7ab4dd6dbffa234fc4e93cfa2ce SOURCES/makedumpfile-1.7.3.tar.gz
+38d78bcfa33a88928324b57dc81f50c1dfc279eede45e80957ca18f4e84b8187 SOURCES/kexec-tools-2.0.27.tar.xz
+0554f5de516c51f5756e437dbfc353722b16b20e875241275554b474e89298db SOURCES/makedumpfile-1.7.4.tar.gz

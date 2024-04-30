@@ -1,10 +1,10 @@
 %global eppic_ver e8844d3793471163ae4a56d8f95897be9e5bd554
 %global eppic_shortver %(c=%{eppic_ver}; echo ${c:0:7})
-%global mkdf_ver 1.7.3
+%global mkdf_ver 1.7.4
 %global mkdf_shortver %(c=%{mkdf_ver}; echo ${c:0:7})
 
 Name: kexec-tools
-Version: 2.0.26
+Version: 2.0.27
 Release: 8%{?dist}
 License: GPLv2
 Summary: The kexec/kdump userspace component
@@ -113,10 +113,7 @@ Requires:       systemd-udev%{?_isa}
 #
 # Patches 601 onward are generic patches
 #
-Patch601: kexec-tools-2.0.26-0001-ppc64-add-reuse-cmdline-parameter-support.patch
-Patch602: kexec-tools-2.0.26-0002-kexec-make-a-the-default.patch
-Patch603: kexec-tools-2.0.26-0003-x86-add-devicetree-support.patch
-Patch604: kexec-tools-2.0.26-0004-ppc64-Add-elf-ppc64-file-types-options-and-an-arch-s.patch
+Patch601: kexec-update-manpage-with-explicit-mention-of-clean-.patch
 
 %description
 kexec-tools provides /sbin/kexec binary that facilitates a new
@@ -133,9 +130,6 @@ tar -z -x -v -f %{SOURCE9}
 tar -z -x -v -f %{SOURCE19}
 
 %patch601 -p1
-%patch602 -p1
-%patch603 -p1
-%patch604 -p1
 
 %ifarch ppc
 %define archdef ARCH=ppc
@@ -414,6 +408,38 @@ fi
 %endif
 
 %changelog
+* Tue Jan 30 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8
+- dracut-module-setup: Skip initrd-cleanup and initrd-parse-etc in kdump
+
+* Wed Jan 3 2024 Tao Liu <ltao@redhat.com> - 2.0.27-7
+- Explain the auto_reset_crashkernel option in more details
+- Use the same /etc/resolve.conf in kdump initrd if it's managed manually
+
+* Wed Dec 20 2023 Tao Liu <ltao@redhat.com> - 2.0.27-6
+- Use the same /etc/resolve.conf in kdump initrd if it's managed manually
+
+* Fri Nov 24 2023 Tao Liu <ltao@redhat.com> - 2.0.27-5
+- kdumpctl: Only returns immediately after an error occurs in check_*_modified
+
+* Thu Nov 16 2023 Tao Liu <ltao@redhat.com> - 2.0.27-4
+- kdump-lib.sh: add extra 64M to default crashkernel if sme/sev is active
+- Allow _crashkernel_add to address larger memory ranges
+- kdump-lib: Harden _crashkernel_add
+
+* Wed Nov 8 2023 Tao Liu <ltao@redhat.com> - 2.0.27-3
+- Rebase makedumpfile to v1.7.4
+- powerpc: update kdumpctl to load kernel signing key for fadump
+- powerpc: update kdumpctl to remove deletion of kernel signing key once loaded
+
+* Mon Nov 6 2023 Tao Liu <ltao@redhat.com> - 2.0.27-2
+- kexec: update manpage with explicit mention of clean kexec
+
+* Tue Sep 26 2023 Tao Liu <ltao@redhat.com> - 2.0.26-9
+- Introduce a function to get reserved memory size
+- powerpc: update fadump sysfs node path
+- kdumpctl: merge check_current_{kdump,fadump}_status
+- kdumpctl: remove unnecessary uses of $?
+
 * Tue Jul 4 2023 Tao Liu <ltao@redhat.com> - 2.0.26-8
 - spec: kdump/ppc64: make servicelog_notify silent when there are no errors
 
