@@ -538,28 +538,22 @@ check_fs_modified()
 check_system_modified()
 {
 	local ret
+	local CONF_ERROR=2
+	local CONF_MODIFY=1
+	local CONF_NO_MODIFY=0
+	local conf_status=$CONF_NO_MODIFY
 
 	[[ -f $TARGET_INITRD ]] || return 1
 
-	check_files_modified
-	ret=$?
-	if [ $ret -ne 0 ]; then
-		return $ret
-	fi
+	for _func in check_files_modified check_fs_modified check_drivers_modified; do
+		$_func
+		ret=$?
+		# return immediately if an error occurred.
+		[[ $ret -eq "$CONF_ERROR" ]] && return "$ret"
+		[[ $ret -eq "$CONF_MODIFY" ]] && { conf_status="$CONF_MODIFY"; }
+	done
 
-	check_fs_modified
-	ret=$?
-	if [ $ret -ne 0 ]; then
-		return $ret
-	fi
-
-	check_drivers_modified
-	ret=$?
-	if [ $ret -ne 0 ]; then
-		return $ret
-	fi
-
-	return 0
+	return $conf_status
 }
 
 check_rebuild()
@@ -653,20 +647,7 @@ function load_kdump_kernel_key()
                 return
         fi
 
-        KDUMP_KEY_ID=$(cat /usr/share/doc/kernel-keys/$KDUMP_KERNELVER/kernel-signing-ppc.cer |
-                        keyctl padd asymmetric kernelkey-$RANDOM %:.ima)
-}
-
-# remove a previously loaded key. There's no real security implication
-# to leaving it around, we choose to do this because it makes it easier
-# to be idempotent and so as to reduce the potential for confusion.
-function remove_kdump_kernel_key()
-{
-	if [ -z "$KDUMP_KEY_ID" ]; then
-		return
-	fi
-
-	keyctl unlink $KDUMP_KEY_ID %:.ima
+	keyctl padd asymmetric "" %:.ima < "/usr/share/doc/kernel-keys/$KDUMP_KERNELVER/kernel-signing-ppc.cer"
 }
 
 # Load the kdump kernel specified in /etc/sysconfig/kdump
@@ -678,15 +659,6 @@ load_kdump()
 
 	KEXEC_ARGS=$(prepare_kexec_args "${KEXEC_ARGS}")
 	KDUMP_COMMANDLINE=$(prepare_cmdline "${KDUMP_COMMANDLINE}" "${KDUMP_COMMANDLINE_REMOVE}" "${KDUMP_COMMANDLINE_APPEND}")
-
-	# For secureboot enabled machines, use new kexec file based syscall.
-	# Old syscall will always fail as it does not have capability to
-	# to kernel signature verification.
-	if is_secure_boot_enforced; then
-		dinfo "Secure Boot is enabled. Using kexec file based syscall."
-		KEXEC_ARGS="$KEXEC_ARGS -s"
-		load_kdump_kernel_key
-	fi
 
 	ddebug "$KEXEC $KEXEC_ARGS $standard_kexec_args --command-line=$KDUMP_COMMANDLINE --initrd=$TARGET_INITRD $KDUMP_KERNEL"
 
@@ -708,9 +680,7 @@ load_kdump()
 	set +x
 	exec 2>&12 12>&-
 
-	remove_kdump_kernel_key
-
-	if [ $ret == 0 ]; then
+	if [[ $ret == 0 ]]; then
 		dinfo "kexec: loaded kdump kernel"
 		return 0
 	else
@@ -848,7 +818,7 @@ propagate_ssh_key()
 
 show_reserved_mem()
 {
-    local mem=$(cat /sys/kernel/kexec_crash_size)
+    local mem=$(get_reserved_mem_size)
     local mem_mb=$(expr $mem / 1024 / 1024)
 
     dinfo "Reserved "$mem_mb"MB memory for crash kernel"
@@ -1009,7 +979,13 @@ start_fadump()
 
 start_dump()
 {
-	if [ $DEFAULT_DUMP_MODE == "fadump" ]; then
+	# On secure boot enabled Power systems, load kernel signing key on .ima for signature
+	# verification using kexec file based syscall.
+	if [[ "$(uname -m)" == ppc64le ]] && is_secure_boot_enforced; then
+		load_kdump_kernel_key
+	fi
+
+	if [[ $DEFAULT_DUMP_MODE == "fadump" ]]; then
 		start_fadump
 	else
 		load_kdump
@@ -1270,7 +1246,7 @@ do_estimate() {
 	# The default value when using crashkernel=auto
 	baseline_size=$((baseline * size_mb))
 	# Current reserved crashkernel size
-	reserved_size=$(cat /sys/kernel/kexec_crash_size)
+	reserved_size=$(get_reserved_mem_size)
 	# A pre-estimated value for userspace usage and kernel
 	# runtime allocation, 64M should good for most cases
 	runtime_size=$((64 * size_mb))

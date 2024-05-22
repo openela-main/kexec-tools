@@ -1,6 +1,6 @@
 Name: kexec-tools
 Version: 2.0.26
-Release: 8%{?dist}
+Release: 14%{?dist}
 License: GPLv2
 Group: Applications/System
 Summary: The kexec/kdump userspace component
@@ -396,6 +396,25 @@ done
 %endif
 
 %changelog
+* Wed Feb 21 2024 Pingfan Liu <piliu@redhat.com> - 2.0.26-14
+- dracut-module-setup: Skip initrd-cleanup and initrd-parse-etc in kdump
+
+* Fri Feb  2 2024 Pingfan Liu <piliu@redhat.com> - 2.0.26-13
+- dracut-module-setup.sh: also install the driver of physical NIC for Hyper-V VM with accelerated networking
+
+* Wed Nov 22 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-12
+- kdumpctl: Only returns immediately after an error occurs in check_*_modified
+
+* Thu Nov  9 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-11
+- powerpc: update kdumpctl to load kernel signing key for fadump
+- powerpc: update kdumpctl to remove deletion of kernel signing key once loaded
+
+* Tue Sep 26 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-10
+- Introduce a function to get reserved memory size
+
+* Tue Sep 19 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-9
+- Add lvm thin provision to kdump supported-kdump-targets.txt
+
 * Thu Aug 10 2023 Pingfan Liu <piliu@redhat.com> - 2.0.26-8
 - mkdumprd: Use the correct syntax to redirect the stderr to null
 - mkdumprd: call dracut with --add-device to install the drivers needed by /boot partition automatically for FIPS

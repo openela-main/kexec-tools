@@ -529,11 +529,24 @@ get_dracut_args_target()
     echo $1 | grep "\-\-mount" | sed "s/.*--mount .\(.*\)/\1/" | cut -d' ' -f1
 }
 
+get_reserved_mem_size()
+{
+	local reserved_mem_size=0
+
+	if is_fadump_capable; then
+		reserved_mem_size=$(< /sys/kernel/fadump/mem_reserved)
+	else
+		reserved_mem_size=$(< /sys/kernel/kexec_crash_size)
+	fi
+
+	echo "$reserved_mem_size"
+}
+
 check_crash_mem_reserved()
 {
     local mem_reserved
 
-    mem_reserved=$(cat /sys/kernel/kexec_crash_size)
+    mem_reserved=$(get_reserved_mem_size)
     if [ $mem_reserved -eq 0 ]; then
         derror "No memory reserved for crash kernel"
         return 1
@@ -700,6 +713,15 @@ prepare_kexec_args()
             fi
         fi
     fi
+
+    # For secureboot enabled machines, use new kexec file based syscall.
+    # Old syscall will always fail as it does not have capability to do
+    # kernel signature verification.
+    if is_secure_boot_enforced; then
+        dinfo "Secure Boot is enabled. Using kexec file based syscall."
+        kexec_args="$kexec_args -s"
+    fi
+
     echo $kexec_args
 }
 
