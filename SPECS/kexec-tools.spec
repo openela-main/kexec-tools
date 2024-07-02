@@ -1,6 +1,6 @@
 Name: kexec-tools
 Version: 2.0.26
-Release: 14%{?dist}
+Release: 14%{?dist}.1
 License: GPLv2
 Group: Applications/System
 Summary: The kexec/kdump userspace component
@@ -396,6 +396,9 @@ done
 %endif
 
 %changelog
+* Tue Jun 18 2024 Pingfan Liu <piliu@redhat.com> - 2.0.26-14.1
+- mkdumprd: Fix makedumpfile parameter check
+
 * Wed Feb 21 2024 Pingfan Liu <piliu@redhat.com> - 2.0.26-14
 - dracut-module-setup: Skip initrd-cleanup and initrd-parse-etc in kdump
 
