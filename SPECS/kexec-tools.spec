@@ -5,7 +5,7 @@
 
 Name: kexec-tools
 Version: 2.0.27
-Release: 8%{?dist}
+Release: 8%{?dist}.2
 License: GPLv2
 Summary: The kexec/kdump userspace component
 
@@ -408,6 +408,13 @@ fi
 %endif
 
 %changelog
+* Thu Jul 4 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8.2
+- Install the driver of physical device for a SR-IOV virtual device
+- Try to install PHY and MDIO bus drivers explicitly
+
+* Wed Jun 19 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8.1
+- mkdumprd: Fix makedumpfile parameter check.
+
 * Tue Jan 30 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8
 - dracut-module-setup: Skip initrd-cleanup and initrd-parse-etc in kdump
 
