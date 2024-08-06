@@ -5,7 +5,7 @@
 
 Name: kexec-tools
 Version: 2.0.27
-Release: 8%{?dist}.2
+Release: 8%{?dist}.3
 License: GPLv2
 Summary: The kexec/kdump userspace component
 
@@ -408,6 +408,10 @@ fi
 %endif
 
 %changelog
+* Wed Jul 24 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8.3
+- lib: Ensure we don't find bind mounts for device target
+- dracut: Disable ostree-prepare-root
+
 * Thu Jul 4 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8.2
 - Install the driver of physical device for a SR-IOV virtual device
 - Try to install PHY and MDIO bus drivers explicitly
