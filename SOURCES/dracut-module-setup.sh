@@ -326,7 +326,7 @@ kdump_setup_ifname() {
     # fadump to kdump. Skip prefixing 'kdump-' in this case as adding
     # another prefix may truncate the ifname. Since an ifname with
     # 'kdump-' is already persistent, this should be fine.
-    if [[ $1 =~ eth* ]] && [[ ! $1 =~ ^kdump-* ]]; then
+    if [[ $1 =~ ^eth.* ]] && [[ ! $1 =~ ^kdump-* ]]; then
         _ifname="kdump-$1"
     else
         _ifname="$1"
