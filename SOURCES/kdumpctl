@@ -5,7 +5,6 @@ KDUMP_KERNELVER=""
 KDUMP_KERNEL=""
 KDUMP_COMMANDLINE=""
 KEXEC_ARGS=""
-KDUMP_LOG_PATH="/var/log"
 MKDUMPRD="/sbin/mkdumprd -f"
 MKFADUMPRD="/sbin/mkfadumprd"
 DRACUT_MODULES_FILE="/usr/lib/dracut/modules.txt"
@@ -21,7 +20,7 @@ TARGET_INITRD=""
 DEFAULT_DUMP_MODE="kdump"
 image_time=0
 
-standard_kexec_args="-d -p"
+standard_kexec_args="-p"
 
 # Some default values in case /etc/sysconfig/kdump doesn't include
 KDUMP_COMMANDLINE_REMOVE="hugepages hugepagesz slub_debug"
@@ -639,7 +638,7 @@ function load_kdump_kernel_key()
 # as the currently running kernel.
 load_kdump()
 {
-	local ret uki
+	local uki
 
 	KEXEC_ARGS=$(prepare_kexec_args "${KEXEC_ARGS}")
 	KDUMP_COMMANDLINE=$(prepare_cmdline "${KDUMP_COMMANDLINE}" "${KDUMP_COMMANDLINE_REMOVE}" "${KDUMP_COMMANDLINE_APPEND}")
@@ -656,26 +655,12 @@ load_kdump()
 
 	ddebug "$KEXEC $KEXEC_ARGS $standard_kexec_args --command-line=$KDUMP_COMMANDLINE --initrd=$TARGET_INITRD $KDUMP_KERNEL"
 
-	# The '12' represents an intermediate temporary file descriptor
-	# to store the standard error file descriptor '2', and later
-	# restore the error file descriptor with the file descriptor '12'
-	# and release it.
-	exec 12>&2
-	exec 2>> $KDUMP_LOG_PATH/kdump.log
-	chmod 600 $KDUMP_LOG_PATH/kdump.log
-	PS4='+ $(date "+%Y-%m-%d %H:%M:%S") ${BASH_SOURCE}@${LINENO}: '
-	set -x
-
 	# shellcheck disable=SC2086
 	$KEXEC $KEXEC_ARGS $standard_kexec_args \
 		--command-line="$KDUMP_COMMANDLINE" \
 		--initrd="$TARGET_INITRD" "$KDUMP_KERNEL"
 
-	ret=$?
-	set +x
-	exec 2>&12 12>&-
-
-	if [[ $ret == 0 ]]; then
+	if [[ $? == 0 ]]; then
 		dinfo "kexec: loaded kdump kernel"
 		return 0
 	else
@@ -1658,6 +1643,7 @@ reset_crashkernel()
 
 		_old_crashkernel=$(get_grub_kernel_boot_parameter "$_kernel" crashkernel)
 		_old_fadump_val=$(get_grub_kernel_boot_parameter "$_kernel" fadump)
+		[[ "$_new_fadump_val" == off ]] && _new_fadump_val=""
 		if [[ $_old_crashkernel != "$_new_crashkernel" || $_old_fadump_val != "$_new_fadump_val" ]]; then
 			_update_kernel_cmdline "$_kernel" "$_new_crashkernel" "$_new_dump_mode" "$_new_fadump_val"
 			if [[ $_reboot != yes ]]; then

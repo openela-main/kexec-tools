@@ -15,7 +15,7 @@ is_uki()
 	img="$1"
 
 	[[ -f "$img" ]] || return
-	[[ "$(file -b --mime-type "$img")" == application/x-dosexec ]] || return
+	[[ "$(objdump -a "$img" 2> /dev/null)" =~ pei-(x86-64|aarch64-little) ]] || return
 	objdump -h -j .linux "$img" &> /dev/null
 }
 
@@ -213,7 +213,7 @@ get_bind_mount_source()
 
 	_fsroot=${_src#${_src_nofsroot}[}
 	_fsroot=${_fsroot%]}
-	_mnt=$(get_mntpoint_from_target "$_src_nofsroot")
+	_mnt=$(get_mount_info TARGET source "$_src_nofsroot" -f)
 
 	# for btrfs, _fsroot will also contain the subvol value as well, strip it
 	if [[ $_fstype == btrfs ]]; then

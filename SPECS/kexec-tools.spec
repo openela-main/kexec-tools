@@ -5,7 +5,7 @@
 
 Name: kexec-tools
 Version: 2.0.27
-Release: 8%{?dist}.3
+Release: 16%{?dist}.1
 License: GPLv2
 Summary: The kexec/kdump userspace component
 
@@ -114,6 +114,7 @@ Requires:       systemd-udev%{?_isa}
 # Patches 601 onward are generic patches
 #
 Patch601: kexec-update-manpage-with-explicit-mention-of-clean-.patch
+Patch602: kexec_file-add-kexec_file-flag-to-support-debug-prin.patch
 
 %description
 kexec-tools provides /sbin/kexec binary that facilitates a new
@@ -130,6 +131,7 @@ tar -z -x -v -f %{SOURCE9}
 tar -z -x -v -f %{SOURCE19}
 
 %patch601 -p1
+%patch602 -p1
 
 %ifarch ppc
 %define archdef ARCH=ppc
@@ -408,16 +410,38 @@ fi
 %endif
 
 %changelog
-* Wed Jul 24 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8.3
+* Wed Sep 18 2024 Tao Liu <ltao@redhat.com> - 2.0.27-16.1
+- Rebuild with updated release
+
+* Tue Sep 10 2024 Tao Liu <ltao@redhat.com> - 2.0.27-16
+- Revert "lib: Ensure we don't find bind mounts for device target"
+
+* Wed Aug 7 2024 Tao Liu <ltao@redhat.com> - 2.0.27-15
+- Support setting up Open vSwitch (Ovs) Bridge network
+
+* Wed Jul 24 2024 Tao Liu <ltao@redhat.com> - 2.0.27-14
 - lib: Ensure we don't find bind mounts for device target
 - dracut: Disable ostree-prepare-root
 
-* Thu Jul 4 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8.2
+* Tue Jul 16 2024 Tao Liu <ltao@redhat.com> - 2.0.27-13
+- kdump-lib: Drop 'file' dependency in is_uki
+- kdumpctl.8: Add description to reset-crashkernel --reboot
+- kdumpctl: Fix misleading message and erratic reboot in reset_crashkernel
+- kdumpctl: Drop default kexec '-d' option
+
+* Thu Jun 27 2024 Tao Liu <ltao@redhat.com> - 2.0.27-12
+- ppc64le: replace kernel cmdline maxcpu=1 with nr_cpus=1
+
+* Fri May 31 2024 Tao Liu <ltao@redhat.com> - 2.0.27-11
+- sysconfig: add pcie_ports compat to KDUMP_COMMANDLINE_APPEND on x86_64
+
+* Tue May 14 2024 Tao Liu <ltao@redhat.com> - 2.0.27-10
+- mkdumprd: Fix makedumpfile parameter check.
 - Install the driver of physical device for a SR-IOV virtual device
 - Try to install PHY and MDIO bus drivers explicitly
 
-* Wed Jun 19 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8.1
-- mkdumprd: Fix makedumpfile parameter check.
+* Wed May 08 2024 Tao Liu <ltao@redhat.com> - 2.0.27-9
+- kexec_file: add kexec_file flag to support debug printing
 
 * Tue Jan 30 2024 Tao Liu <ltao@redhat.com> - 2.0.27-8
 - dracut-module-setup: Skip initrd-cleanup and initrd-parse-etc in kdump
