@@ -1,11 +1,11 @@
 %global eppic_ver e8844d3793471163ae4a56d8f95897be9e5bd554
 %global eppic_shortver %(c=%{eppic_ver}; echo ${c:0:7})
-%global mkdf_ver 1.7.4
+%global mkdf_ver 1.7.6
 %global mkdf_shortver %(c=%{mkdf_ver}; echo ${c:0:7})
 
 Name: kexec-tools
-Version: 2.0.27
-Release: 16%{?dist}.1
+Version: 2.0.29
+Release: 5%{?dist}
 License: GPLv2
 Summary: The kexec/kdump userspace component
 
@@ -46,6 +46,7 @@ Source35: kdump-migrate-action.sh
 Source36: kdump-restart.sh
 Source37: 60-fadump.install
 Source38: supported-kdump-targets.txt
+Source39: 99-kdump.conf
 
 #######################################
 # These are sources for mkdumpramfs
@@ -113,8 +114,6 @@ Requires:       systemd-udev%{?_isa}
 #
 # Patches 601 onward are generic patches
 #
-Patch601: kexec-update-manpage-with-explicit-mention-of-clean-.patch
-Patch602: kexec_file-add-kexec_file-flag-to-support-debug-prin.patch
 
 %description
 kexec-tools provides /sbin/kexec binary that facilitates a new
@@ -129,9 +128,6 @@ component of the kernel's kexec feature.
 mkdir -p -m755 kcp
 tar -z -x -v -f %{SOURCE9}
 tar -z -x -v -f %{SOURCE19}
-
-%patch601 -p1
-%patch602 -p1
 
 %ifarch ppc
 %define archdef ARCH=ppc
@@ -184,7 +180,7 @@ mkdir -p -m755 $RPM_BUILD_ROOT%{_udevrulesdir}
 mkdir -p $RPM_BUILD_ROOT%{_unitdir}
 mkdir -p -m755 $RPM_BUILD_ROOT%{_bindir}
 mkdir -p -m755 $RPM_BUILD_ROOT%{_libdir}
-mkdir -p -m755 $RPM_BUILD_ROOT%{_prefix}/lib/kdump
+mkdir -p -m755 $RPM_BUILD_ROOT%{_prefix}/lib/kdump/dracut.conf.d
 mkdir -p -m755 $RPM_BUILD_ROOT%{_sharedstatedir}/kdump
 install -m 755 %{SOURCE1} $RPM_BUILD_ROOT%{_bindir}/kdumpctl
 
@@ -206,6 +202,7 @@ install -m 644 %{SOURCE25} $RPM_BUILD_ROOT%{_mandir}/man8/kdumpctl.8
 install -m 755 %{SOURCE20} $RPM_BUILD_ROOT%{_prefix}/lib/kdump/kdump-lib.sh
 install -m 755 %{SOURCE23} $RPM_BUILD_ROOT%{_prefix}/lib/kdump/kdump-lib-initramfs.sh
 install -m 755 %{SOURCE31} $RPM_BUILD_ROOT%{_prefix}/lib/kdump/kdump-logger.sh
+install -m 644 %{SOURCE39} $RPM_BUILD_ROOT%{_prefix}/lib/kdump/dracut.conf.d/99-kdump.conf
 %ifarch ppc64 ppc64le
 install -m 755 %{SOURCE32} $RPM_BUILD_ROOT/usr/sbin/mkfadumprd
 install -m 755 %{SOURCE35} $RPM_BUILD_ROOT%{_prefix}/lib/kdump/kdump-migrate-action.sh
@@ -410,8 +407,31 @@ fi
 %endif
 
 %changelog
-* Wed Sep 18 2024 Tao Liu <ltao@redhat.com> - 2.0.27-16.1
-- Rebuild with updated release
+* Fri Jan 17 2025 Tao Liu <ltao@redhat.com> - 2.0.29-5
+- 99-kdump.conf: Omit nouveau and amdgpu module
+
+* Fri Jan 10 2025 Tao Liu <ltao@redhat.com> - 2.0.29-4
+- kdump.service: Replace ConditionKernelCommandLine with ExecCondition
+
+* Fri Dec 13 2024 Tao Liu <ltao@redhat.com> - 2.0.29-3
+- fadump: fix passing additional parameters for capture kernel
+- fadump: pass additional parameters for capture kernel
+
+* Fri Dec 6 2024 Tao Liu <ltao@redhat.com> - 2.0.29-2
+- Re-introduce vmcore creation notification to kdump
+- Revert "Introduce vmcore creation notification to kdump"
+- Add kdump dracut config
+- kdump-lib-initramfs: Improve mount point retrieval logic
+
+* Wed Nov 6 2024 Tao Liu <ltao@redhat.com> - 2.0.29-1
+- Release 2.0.29-1
+- Rebase makedumpfile to v1.7.6
+
+* Mon Oct 21 2024 Tao Liu <ltao@redhat.com> - 2.0.27-18
+- Return the correct exit code of rebuild initrd
+
+* Tue Oct 8 2024 Tao Liu <ltao@redhat.com> - 2.0.27-17
+- Introduce vmcore creation notification to kdump
 
 * Tue Sep 10 2024 Tao Liu <ltao@redhat.com> - 2.0.27-16
 - Revert "lib: Ensure we don't find bind mounts for device target"

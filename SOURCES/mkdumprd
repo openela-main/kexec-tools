@@ -27,7 +27,7 @@ SAVE_PATH=$(get_save_path)
 OVERRIDE_RESETTABLE=0
 
 extra_modules=""
-dracut_args=(--add kdumpbase --quiet --hostonly --hostonly-cmdline --hostonly-i18n --hostonly-mode strict --hostonly-nics '' -o "plymouth resume ifcfg earlykdump")
+dracut_args=(--quiet --hostonly --hostonly-cmdline --hostonly-i18n --hostonly-mode strict --hostonly-nics '')
 
 MKDUMPRD_TMPDIR="$(mktemp -d -t mkdumprd.XXXXXX)"
 [ -d "$MKDUMPRD_TMPDIR" ] || perror_exit "dracut: mktemp -p -d -t dracut.XXXXXX failed."
@@ -472,6 +472,15 @@ fi
 # This is RHEL-only to work around nvme problem, then real fix should go to dracut
 if [[ -d /sys/module/nvme ]]; then
 	add_dracut_arg "--add-drivers" "nvme"
+fi
+
+# Use kdump managed dracut profile.
+[[ $kdump_dracut_confdir ]] || kdump_dracut_confdir=/lib/kdump/dracut.conf.d
+if [[ "$(dracut --help)" == *--add-confdir* ]] && [[ -d "$kdump_dracut_confdir" ]]; then
+	dracut_args+=("--add-confdir" "$kdump_dracut_confdir")
+else
+	dracut_args+=(--add kdumpbase)
+	dracut_args+=(--omit "plymouth resume ifcfg earlykdump")
 fi
 
 dracut "${dracut_args[@]}" "$@"
