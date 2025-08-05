@@ -5,7 +5,7 @@
 
 Name: kexec-tools
 Version: 2.0.29
-Release: 5%{?dist}
+Release: 5%{?dist}.2
 License: GPLv2
 Summary: The kexec/kdump userspace component
 
@@ -407,6 +407,12 @@ fi
 %endif
 
 %changelog
+* Thu Jun 19 2025 Tao Liu <ltao@redhat.com> - 2.0.29-5.2
+- Bump up version number
+
+* Fri Jun 6 2025 Tao Liu <ltao@redhat.com> - 2.0.29-5.1
+- 99-kdump.conf: Omit rdma module
+
 * Fri Jan 17 2025 Tao Liu <ltao@redhat.com> - 2.0.29-5
 - 99-kdump.conf: Omit nouveau and amdgpu module
 
