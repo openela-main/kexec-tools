@@ -349,11 +349,6 @@ kdump_install_nmconnections() {
             exit 1
         fi
     done <<< "$(nmcli -t -f device,filename connection show --active)"
-
-    # Stop dracut 35network-manger to calling nm-initrd-generator.
-    # Note this line of code can be removed after NetworkManager >= 1.35.2
-    # gets released.
-    echo > "${initdir}/usr/libexec/nm-initrd-generator"
 }
 
 kdump_install_nm_netif_allowlist() {
@@ -380,7 +375,27 @@ EOF
 }
 
 _get_nic_driver() {
-    ethtool -i "$1" | sed -n -E "s/driver: (.*)/\1/p"
+    local _driver
+
+    _driver=$(ethtool -i "$1" | sed -n -E "s/driver: (.*)/\1/p")
+
+    if [[ $_driver == "802.1Q VLAN Support" ]]; then
+        # ethtool somehow doesn't return the driver name for a VLAN NIC
+        _driver=8021q
+    fi
+
+    if ! modinfo "$_driver" &> /dev/null; then
+        # Fallback to get NIC driver by /sys/class/net/NIC/device/driver/module
+        # as some drivers like dwmac_tegra may report its name incorrectly.
+        # Note this method only for physical NICs i.e it doesn't work for
+        # virtual NICs like bonding NIC
+        _driver=$(basename "$(readlink -f /sys/class/net/"$1"/device/driver/module)")
+        if ! modinfo "$_driver" &> /dev/null; then
+            derror "Failed to find the driver for $1 ($_driver doesnt exist)"
+        fi
+    fi
+
+    echo -n "$_driver"
 }
 
 _get_hpyerv_physical_driver() {
@@ -412,10 +427,7 @@ kdump_install_nic_driver() {
             exit 1
         fi
 
-        if [[ $_driver == "802.1Q VLAN Support" ]]; then
-            # ethtool somehow doesn't return the driver name for a VLAN NIC
-            _driver=8021q
-        elif [[ $_driver == "team" ]]; then
+        if [[ $_driver == "team" ]]; then
             # install the team mode drivers like team_mode_roundrobin.ko as well
             _driver='=drivers/net/team'
         elif [[ $_driver == "hv_netvsc" ]]; then
@@ -690,7 +702,7 @@ kdump_install_net() {
         kdump_install_nmconnections
         apply_nm_initrd_generator_timeouts
         kdump_setup_znet
-        kdump_install_nm_netif_allowlist "$_netifs"
+        [[ $is_nvmf ]] || kdump_install_nm_netif_allowlist "$_netifs"
         kdump_install_nic_driver "$_netifs"
         kdump_install_resolv_conf
         kdump_install_ovs_deps
@@ -947,6 +959,33 @@ kdump_check_iscsi_targets() {
     }
 }
 
+# Callback function for for_each_host_dev_and_slaves_all
+#
+# Code adapted from the is_nvmf function of dracut nvmf module
+kdump_nvmf_callback() {
+    local _dev _d _trtype
+
+    _dev=$1
+
+    cd -P "/sys/dev/block/$_dev" || return 1
+    if [ -f partition ]; then
+        cd ..
+    fi
+
+    for _d in device/nvme*; do
+        [ -L "$_d" ] || continue
+        if readlink "$_d" | grep -q nvme-fabrics; then
+            read -r _trtype < "$_d"/transport
+            [[ $_trtype == "fc" || $_trtype == "tcp" || $_trtype == "rdma" ]] && return 0
+        fi
+    done
+    return 1
+}
+
+kdump_check_nvmf_target() {
+    for_each_host_dev_and_slaves_all kdump_nvmf_callback && is_nvmf=1
+}
+
 # hostname -a is deprecated, do it by ourself
 get_alias() {
     local ips
@@ -1108,7 +1147,7 @@ remove_cpu_online_rule() {
 
 install() {
     declare -A unique_netifs ipv4_usage ipv6_usage
-    local arch has_ovs_bridge
+    local arch has_ovs_bridge is_nvmf
 
     kdump_module_init
     kdump_install_conf
@@ -1162,6 +1201,8 @@ install() {
     # target. Ideally all this should be pushed into dracut iscsi module
     # at some point of time.
     kdump_check_iscsi_targets
+
+    kdump_check_nvmf_target
 
     kdump_install_systemd_conf
 

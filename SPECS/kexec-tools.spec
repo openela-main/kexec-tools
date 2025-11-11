@@ -5,7 +5,7 @@
 
 Name: kexec-tools
 Version: 2.0.29
-Release: 5%{?dist}.2
+Release: 10%{?dist}
 License: GPLv2
 Summary: The kexec/kdump userspace component
 
@@ -407,11 +407,26 @@ fi
 %endif
 
 %changelog
-* Thu Jun 19 2025 Tao Liu <ltao@redhat.com> - 2.0.29-5.2
-- Bump up version number
+* Thu Aug 7 2025 Tao Liu <ltao@redhat.com> - 2.0.29-10
+- sysconfig: disable kfence in kdump kernel
 
-* Fri Jun 6 2025 Tao Liu <ltao@redhat.com> - 2.0.29-5.1
+* Fri Aug 1 2025 Tao Liu <ltao@redhat.com> - 2.0.29-9
+- Support dumping to NVMe/TCP configured using NVMe Boot Firmware Table
+
+* Thu Jun 12 2025 Tao Liu <ltao@redhat.com> - 2.0.29-8
+- kdumpctl: check and generate /etc/vconsole.conf
+- kdump-lib.sh: Reserve crashkernel by default for systems with 1G-2G memory
+
+* Fri Apr 18 2025 Tao Liu <ltao@redhat.com> - 2.0.29-7
+- 99-kdump.conf: Omit clevis related dracut modules
+- kdump-lib.sh: rounded up the total_mem to 128M in get_system_size
+- kdump-lib.sh: Adjust default crashkernel reservation for x86_64 and s390x
+- doc/kdump.conf: correctly align the options
+
+* Fri Mar 7 2025 Tao Liu <ltao@redhat.com> - 2.0.29-6
 - 99-kdump.conf: Omit rdma module
+- Fallback to get NIC driver by /sys/class/net/NIC/device/driver/module
+- Note user-specified crashkernel value will be overwritten by default value
 
 * Fri Jan 17 2025 Tao Liu <ltao@redhat.com> - 2.0.29-5
 - 99-kdump.conf: Omit nouveau and amdgpu module

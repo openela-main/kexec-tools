@@ -949,8 +949,11 @@ PROC_IOMEM=/proc/iomem
 #get system memory size i.e. memblock.memory.total_size in the unit of GB
 get_system_size()
 {
-	sum=$(sed -n "s/\s*\([0-9a-fA-F]\+\)-\([0-9a-fA-F]\+\) : System RAM$/+ 0x\2 - 0x\1 + 1/p" $PROC_IOMEM)
-	echo $(( (sum) / 1024 / 1024 / 1024))
+	local _mem_size_mb _sum
+	_sum=$(sed -n "s/\s*\([0-9a-fA-F]\+\)-\([0-9a-fA-F]\+\) : System RAM$/+ 0x\2 - 0x\1 + 1/p" $PROC_IOMEM)
+	_mem_size_mb=$(( (_sum) / 1024 / 1024 ))
+	# rounding up the total_size to 128M to align with kernel code kernel/crash_reserve.c
+	echo $(((_mem_size_mb + 127) / 128 * 128 / 1024 ))
 }
 
 # Return the recommended size for the reserved crashkernel memory
@@ -1153,7 +1156,7 @@ kdump_get_arch_recommend_crashkernel()
 	_arch=$(uname -m)
 
 	if [[ $_arch == "x86_64" ]] || [[ $_arch == "s390x" ]]; then
-		_ck_cmdline="1G-4G:192M,4G-64G:256M,64G-:512M"
+		_ck_cmdline="1G-2G:192M,2G-64G:256M,64G-:512M"
 		is_sme_or_sev_active && ((_delta += 64))
 	elif [[ $_arch == "aarch64" ]]; then
 		local _running_kernel
