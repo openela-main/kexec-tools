@@ -1,6 +1,6 @@
 Name: kexec-tools
-Version: 2.0.29
-Release: 2%{?dist}
+Version: 2.0.31
+Release: 1%{?dist}
 URL: https://kernel.org/pub/linux/utils/kernel/kexec
 License: GPL-2.0-only
 Summary: The kexec/kdump userspace component
@@ -87,6 +87,10 @@ rm -f %{buildroot}/%{_libdir}/kexec-tools/kexec_test
 %doc TODO
 
 %changelog
+* Thu Apr 24 2025 Lichen Liu <lichliu@redhat.com> - 2.0.31-1
+- Update to 2.0.31
+- Resolves: RHEL-86467
+
 * Tue Oct 29 2024 Troy Dawson <tdawson@redhat.com> - 2.0.29-2
 - Bump release for October 2024 mass rebuild:
   Resolves: RHEL-64018
