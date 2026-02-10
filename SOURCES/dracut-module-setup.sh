@@ -113,7 +113,11 @@ add_dns_netdev() {
 
     _server=$1
     _route=`/sbin/ip -o route get to $_server 2>&1`
-    [ $? != 0 ] && echo "DNS server $_server unreachable"
+    # No netdev to add if DNS server is unreachable
+    if [ $? -ne 0 ]; then
+        echo "DNS server $_server unreachable"
+        return
+    fi
 
     _netdev=$(get_ip_route_field "$_route" "dev")
     _save_kdump_netifs "$_netdev" "$(kdump_setup_ifname $_netdev)"
