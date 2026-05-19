@@ -1,12 +1,11 @@
 Name: kexec-tools
-Version: 2.0.31
-Release: 1%{?dist}
+Version: 2.0.32
+Release: 3%{?dist}
 URL: https://kernel.org/pub/linux/utils/kernel/kexec
 License: GPL-2.0-only
 Summary: The kexec/kdump userspace component
 
 Source0: https://kernel.org/pub/linux/utils/kernel/kexec/%{name}-%{version}.tar.xz
-Recommends: kdump-utils
 
 BuildRequires: automake
 BuildRequires: autoconf
@@ -40,6 +39,7 @@ BuildRequires: zlib-devel
 #
 # Patches 601 onward are generic patches
 #
+Patch601: kexec-tools-2.0.32-UKI-Fix-the-size-of-real-payload.patch
 
 %description
 kexec-tools provides /sbin/kexec binary that facilitates a new
@@ -52,6 +52,8 @@ component of the kernel's kexec feature.
 %setup -q
 
 mkdir -p -m755 kcp
+
+%patch 601 -p1
 
 %ifarch ppc
 %define archdef ARCH=ppc
@@ -87,6 +89,17 @@ rm -f %{buildroot}/%{_libdir}/kexec-tools/kexec_test
 %doc TODO
 
 %changelog
+
+* Wed Jan 21 2026 Coiby Xu <coxu@redhat.com> - 2.0.32-3
+- Drop weak dependency on kdump-utils (RHEL-138692)
+
+* Sun Jan  4 2026 Pingfan Liu <piliu@redhat.com> - 2.0.32-2
+- UKI: Fix the size of real payload
+
+* Tue Oct 21 2025 Lichen Liu <lichliu@redhat.com> - 2.0.32-1
+- Update to 2.0.32
+- Resolves: RHEL-113403
+
 * Thu Apr 24 2025 Lichen Liu <lichliu@redhat.com> - 2.0.31-1
 - Update to 2.0.31
 - Resolves: RHEL-86467
