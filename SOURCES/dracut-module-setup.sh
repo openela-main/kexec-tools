@@ -1145,6 +1145,59 @@ remove_cpu_online_rule() {
     sed -i '/SUBSYSTEM=="cpu"/d' "$file"
 }
 
+kdump_check_crypt_targets() {
+    local _devuuid _key_desc
+    declare -a _luks_devs
+
+    # Currently only x86_64 is supported
+    [[ "$(uname -m)" != "x86_64" ]] && return 1
+
+    mapfile -t _luks_devs < <(get_all_kdump_crypt_dev)
+
+    if [[ ${#_luks_devs[@]} -lt 1 ]]; then
+        return
+    fi
+
+    if [[ ! -d $LUKS_CONFIGFS ]]; then
+        dwarn "$LUKS_CONFIGFS not available"
+        return 1
+    fi
+
+    # This overrides behaviour of 90crypt
+    inst cryptsetup
+    instmods dm_crypt
+
+    echo > "$initdir/etc/cmdline.d/90crypt.conf"
+    echo > "$initdir/etc/crypttab"
+    echo > "${initdir}/sbin/crypt-run-generator"
+
+    # configfs is mounted after dracut pre-udev hook
+    # shellcheck disable=SC2154
+    inst_hook initqueue 20 "$moddir/kexec-crypt-setup.sh"
+
+    # shellcheck disable=SC2154
+    mkdir -p "$hookdir/initqueue/finished"
+    CRYPTSETUP_PATH=$(command -v cryptsetup)
+    for _devuuid in "${_luks_devs[@]}"; do
+        _key_desc=$LUKS_KEY_PRFIX$_devuuid
+        cat << EOF >> "${initdir}/etc/udev/rules.d/70-luks-kdump.rules"
+ENV{ID_FS_UUID}=="$_devuuid", \
+RUN+="/sbin/initqueue  --settled --unique --onetime --name kdump-crypt-target-%k \
+$CRYPTSETUP_PATH luksOpen --volume-key-keyring \
+%%user:$_key_desc \$env{DEVNAME} luks-$_devuuid"
+EOF
+    done
+
+    # latest systemd makes /usr read-only by default
+    mkdir -p "${initdir}/etc/systemd/system.conf.d"
+    cat << EOF > "${initdir}/etc/systemd/system.conf.d/kdump_luks.conf"
+[Manager]
+ProtectSystem=false
+EOF
+
+    dracut_need_initqueue
+}
+
 install() {
     declare -A unique_netifs ipv4_usage ipv6_usage
     local arch has_ovs_bridge is_nvmf
@@ -1183,6 +1236,7 @@ install() {
     inst "/usr/bin/printf" "/sbin/printf"
     inst "/usr/bin/logger" "/sbin/logger"
     inst "/usr/bin/chmod" "/sbin/chmod"
+    inst "/usr/bin/nproc" "/sbin/nproc"
     inst "/lib/kdump/kdump-lib-initramfs.sh" "/lib/kdump-lib-initramfs.sh"
     inst "/lib/kdump/kdump-logger.sh" "/lib/kdump-logger.sh"
     inst "$moddir/kdump.sh" "/usr/bin/kdump.sh"
@@ -1203,6 +1257,8 @@ install() {
     kdump_check_iscsi_targets
 
     kdump_check_nvmf_target
+
+    kdump_check_crypt_targets
 
     kdump_install_systemd_conf
 

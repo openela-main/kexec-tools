@@ -17,8 +17,7 @@ KDUMP_PATH="/var/crash"
 KDUMP_LOG_FILE="/run/initramfs/kexec-dmesg.log"
 KDUMP_TEST_ID=""
 KDUMP_TEST_STATUS=""
-CORE_COLLECTOR=""
-DEFAULT_CORE_COLLECTOR="makedumpfile -l --message-level 7 -d 31"
+CORE_COLLECTOR="makedumpfile -l --message-level 7 -d 31"
 DMESG_COLLECTOR="/sbin/vmcore-dmesg"
 FAILURE_ACTION="systemctl reboot -f"
 DATEDIR=$(date +%Y-%m-%d-%T)
@@ -104,12 +103,25 @@ get_kdump_confs()
 		esac
 	done < "$KDUMP_CONF_PARSED"
 
-	if [ -z "$CORE_COLLECTOR" ]; then
-		CORE_COLLECTOR="$DEFAULT_CORE_COLLECTOR"
-		if is_ssh_dump_target || is_raw_dump_target; then
-			CORE_COLLECTOR="$CORE_COLLECTOR -F"
-		fi
-	fi
+	case $CORE_COLLECTOR in
+	    *makedumpfile*)
+	        # Ensure no -F in makedumpfile by default.
+	        CORE_COLLECTOR=$(echo "$CORE_COLLECTOR" | sed -e "s/-F//g")
+	        if is_ssh_dump_target || is_raw_dump_target; then
+	            CORE_COLLECTOR="$CORE_COLLECTOR -F"
+	        fi
+	        THREADS=$(nproc)
+	        if [ "$THREADS" -gt 1 ]; then
+	            case "$CORE_COLLECTOR" in
+	                *-F* | *-E*) ;;
+
+	               *)
+	                    CORE_COLLECTOR="$CORE_COLLECTOR --num-threads=$THREADS"
+	                    ;;
+	            esac
+	        fi
+	        ;;
+	esac
 }
 
 # store the kexec kernel log to a file.
@@ -135,13 +147,6 @@ dump_fs()
 			return 1
 		fi
 	fi
-
-	# Remove -F in makedumpfile case. We don't want a flat format dump here.
-	case $CORE_COLLECTOR in
-	*makedumpfile*)
-		CORE_COLLECTOR=$(echo "$CORE_COLLECTOR" | sed -e "s/-F//g")
-		;;
-	esac
 
 	if [ -z "$KDUMP_TEST_ID" ]; then
 		_dump_fs_path=$(echo "$1/$KDUMP_PATH/$HOST_IP-$DATEDIR/" | tr -s /)

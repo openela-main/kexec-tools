@@ -12,6 +12,7 @@ ExecReload=/usr/bin/kdumpctl reload
 RemainAfterExit=yes
 StartLimitInterval=0
 PrivateTmp=yes
+KeyringMode=shared
 
 [Install]
 WantedBy=multi-user.target
